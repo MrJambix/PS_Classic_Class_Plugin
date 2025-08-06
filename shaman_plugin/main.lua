@@ -1,7 +1,6 @@
 -- === Project Sylvanas Shaman Plugin ===
 -- Main.lua, NO Healer UI Window, only internal healer logic, and comments
--- Solo Leveling Checkmark (DPS logic toggle) in UI
--- AutoAttack Helper + Profiler integration in DPS rotation
+-- Solo Leveling DPS logic only fires if player is in combat with a target
 -- Lightning Bolt REMOVED from DPS, Lightning Shield only handled by Auto Lightning Shield toggle
 -- Imbuements only maintained if enabled in "Auto Weapon Imbue"
 
@@ -28,19 +27,13 @@ local SPELLS = {
     EarthShockHighest = 8042,
     FlameShock = 8050,
     FrostShock = 8056,
-    LightningBolt = 403,
+    LightningBolt = 403,  -- (WILL REMOVE IN FUTURE UPDATE, not used in DPS)
     Purge = 370,
-    AstralRecall = 556,
-    GhostWolf = 2645,
-    FarSight = 6196,
     LightningShield = 324,
-    WaterBreathing = 131,
-    WaterWalking = 546,
     AncestralSpirit = 2008,
     CureDisease = 2870,
     CurePoison = 526,
     NaturesSwiftness = 16188,
-    Reincarnation = 20608,
     ChainHeal = 1064,
 }
 
@@ -75,10 +68,9 @@ local HEALING_WAVE_RANKS = {
     [3] = 547,  -- Rank 3
     [4] = 913,  -- Rank 4
     [5] = 939,  -- Rank 5
-    -- [10]=25396  -- Keep this if you want to handle max rank later
 }
 local LESSER_HEALING_WAVE_RANKS = {
-    [1] = 8004,  -- Rank 1 (add more as discovered)
+    [1] = 8004,  -- Rank 1
 }
 local CHAIN_HEAL_RANKS = {
     [1] = 1064,
@@ -173,7 +165,7 @@ local auto_lightning_shield = { value = false }
 local healer_mode = { value = false }
 local allow_potions = { value = false }
 local allow_ooc_heal = { value = false }
-local solo_leveling_dps = { value = false } -- DPS checkmark for solo/leveling logic
+local solo_leveling_dps = { value = false }
 
 local FONT_SMALL = 1
 local FONT_MEDIUM = 1
@@ -362,16 +354,21 @@ local function shaman_rotation_logic()
         end
     end
 
-    -- === SOLO LEVELING DPS LOGIC (NO Lightning Bolt/Shield) ===
+    -- === SOLO LEVELING DPS LOGIC (ONLY IN COMBAT) ===
     if solo_leveling_dps.value then
-        -- Priority: Flame Shock > Earth Shock (NO Lightning Bolt, NO Lightning Shield)
+        -- Find a target we're currently in combat with
         local enemies = unit_helper:get_enemy_list_around(player:get_position(), 30, true, false, false, false)
         local target = nil
         for _, unit in ipairs(enemies) do
-            if unit_helper:is_valid_enemy(unit) and not unit:is_dead() and not unit_helper:is_dummy(unit) then
-                target = unit
-                break
-            end
+           if unit_helper:is_valid_enemy(unit)
+    and not unit:is_dead()
+    and not unit_helper:is_dummy(unit)
+    and unit_helper:is_in_combat(unit)
+    and unit:is_in_combat()
+then
+    target = unit
+    break
+end
         end
         if target then
             -- AutoAttack Helper: don't cast spells if next swing is within 0.3s
@@ -553,7 +550,7 @@ end)
     === SOLO LEVELING DPS LOGIC (NEW)       ==
     ==========================================
     - Toggle the "Solo Leveling DPS Logic" checkbox in the Shaman UI to enable/disable DPS/leveling logic.
-    - DPS logic will prioritize Flame Shock > Earth Shock on nearest enemy.
+    - DPS logic will prioritize Flame Shock > Earth Shock on nearest enemy IN COMBAT with you.
     - Lightning Bolt and Lightning Shield are not included in the solo DPS logic.
     - Imbue spells are controlled by the "Auto Weapon Imbue" checkboxes.
 --]]
