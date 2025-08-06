@@ -1,5 +1,9 @@
 -- === Project Sylvanas Shaman Plugin ===
--- Main.lua with NO Healer UI Window, only internal healer logic, and comments
+-- Main.lua, NO Healer UI Window, only internal healer logic, and comments
+-- Solo Leveling Checkmark (DPS logic toggle) in UI
+-- AutoAttack Helper + Profiler integration in DPS rotation
+-- Lightning Bolt REMOVED from DPS, Lightning Shield only handled by Auto Lightning Shield toggle
+-- Imbuements only maintained if enabled in "Auto Weapon Imbue"
 
 local core = _G.core
 local menu = core.menu
@@ -13,6 +17,8 @@ local buff_manager = require("common/modules/buff_manager")
 local spell_helper = require("common/utility/spell_helper")
 local unit_helper = require("common/utility/unit_helper")
 local cooldown_tracker = require("common/utility/cooldown_tracker")
+local auto_attack_helper = require("common/utility/auto_attack_helper")
+local profiler = require("common/modules/profiler")
 
 -- === SHAMAN SPELL IDS ===
 local SPELLS = {
@@ -167,6 +173,7 @@ local auto_lightning_shield = { value = false }
 local healer_mode = { value = false }
 local allow_potions = { value = false }
 local allow_ooc_heal = { value = false }
+local solo_leveling_dps = { value = false } -- DPS checkmark for solo/leveling logic
 
 local FONT_SMALL = 1
 local FONT_MEDIUM = 1
@@ -316,10 +323,13 @@ local function shaman_rotation_logic()
     local player = get_local_player()
     if not player then return end
 
+    -- === Auto Lightning Shield ===
     if can_apply_lightning_shield() and spell_helper:has_spell_equipped(SPELLS.LightningShield) then
         spell_queue:queue_spell_target(SPELLS.LightningShield, player, 2, "Auto Lightning Shield")
+        return
     end
 
+    -- === Auto Weapon Imbue ===
     local imbue_selected = false
     for k, v in pairs(weapon_imbue_state) do
         if v then imbue_selected = true break end
@@ -329,21 +339,72 @@ local function shaman_rotation_logic()
             local spell_id, enchant_id = get_highest_imbue_spell_and_enchant(rockbiter_ranks)
             if spell_id and enchant_id and not is_mainhand_imbued_with(player, enchant_id) then
                 spell_queue:queue_spell_target(spell_id, player, 2, "Auto Imbue: Rockbiter")
+                return
             end
         elseif weapon_imbue_state["windfury"] then
             local spell_id, enchant_id = get_highest_imbue_spell_and_enchant(windfury_ranks)
             if spell_id and enchant_id and not is_mainhand_imbued_with(player, enchant_id) then
                 spell_queue:queue_spell_target(spell_id, player, 2, "Auto Imbue: Windfury")
+                return
             end
         elseif weapon_imbue_state["flametongue"] then
             local spell_id, enchant_id = get_highest_imbue_spell_and_enchant(flametongue_ranks)
             if spell_id and enchant_id and not is_mainhand_imbued_with(player, enchant_id) then
                 spell_queue:queue_spell_target(spell_id, player, 2, "Auto Imbue: Flametongue")
+                return
             end
         elseif weapon_imbue_state["frostbrand"] then
             local spell_id, enchant_id = get_highest_imbue_spell_and_enchant(frostbrand_ranks)
             if spell_id and enchant_id and not is_mainhand_imbued_with(player, enchant_id) then
                 spell_queue:queue_spell_target(spell_id, player, 2, "Auto Imbue: Frostbrand")
+                return
+            end
+        end
+    end
+
+    -- === SOLO LEVELING DPS LOGIC (NO Lightning Bolt/Shield) ===
+    if solo_leveling_dps.value then
+        -- Priority: Flame Shock > Earth Shock (NO Lightning Bolt, NO Lightning Shield)
+        local enemies = unit_helper:get_enemy_list_around(player:get_position(), 30, true, false, false, false)
+        local target = nil
+        for _, unit in ipairs(enemies) do
+            if unit_helper:is_valid_enemy(unit) and not unit:is_dead() and not unit_helper:is_dummy(unit) then
+                target = unit
+                break
+            end
+        end
+        if target then
+            -- AutoAttack Helper: don't cast spells if next swing is within 0.3s
+            local next_attack_time = auto_attack_helper:get_next_attack_core_time(player)
+            local current_time = auto_attack_helper:get_current_combat_core_time()
+            local safe_cast = true
+            if next_attack_time and current_time then
+                if next_attack_time - current_time < 0.30 then
+                    safe_cast = false
+                end
+            end
+            if safe_cast then
+                -- Profiler integration
+                if spell_helper:has_spell_equipped(SPELLS.FlameShock)
+                    and not spell_helper:is_spell_on_cooldown(SPELLS.FlameShock)
+                    and spell_helper:is_spell_in_range(SPELLS.FlameShock, player, target:get_position(), player:get_position(), target:get_position())
+                    and spell_helper:is_spell_in_line_of_sight(SPELLS.FlameShock, player, target)
+                then
+                    profiler.start("FlameShock")
+                    spell_queue:queue_spell_target(SPELLS.FlameShock, target, 1, "Solo Leveling DPS: Flame Shock")
+                    profiler.stop("FlameShock")
+                    return
+                end
+                if spell_helper:has_spell_equipped(SPELLS.EarthShock)
+                    and not spell_helper:is_spell_on_cooldown(SPELLS.EarthShock)
+                    and spell_helper:is_spell_in_range(SPELLS.EarthShock, player, target:get_position(), player:get_position(), target:get_position())
+                    and spell_helper:is_spell_in_line_of_sight(SPELLS.EarthShock, player, target)
+                then
+                    profiler.start("EarthShock")
+                    spell_queue:queue_spell_target(SPELLS.EarthShock, target, 1, "Solo Leveling DPS: Earth Shock")
+                    profiler.stop("EarthShock")
+                    return
+                end
             end
         end
     end
@@ -455,24 +516,25 @@ core.register_on_render_window_callback(function()
             render_checkbox(shaman_window, "Allow Use of Potions", allow_potions, 105)
             render_checkbox(shaman_window, "Allow Out of Combat Healing", allow_ooc_heal, 135)
             render_checkbox(shaman_window, "Auto Lightning Shield", auto_lightning_shield, 165)
+            render_checkbox(shaman_window, "Solo Leveling DPS Logic", solo_leveling_dps, 195)
 
-            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 200), color.white(180), "Totem Controls")
+            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 230), color.white(180), "Totem Controls")
             if shaman_window.add_separator then
-                shaman_window:add_separator(3.0, 3.0, 215.0, 0.0, color.white(40))
+                shaman_window:add_separator(3.0, 3.0, 245.0, 0.0, color.white(40))
             end
-            render_checkbox(shaman_window, "Auto Stoneskin Totem", {value=false}, 230)
-            render_checkbox(shaman_window, "Auto Strength of Earth", {value=false}, 260)
-            render_checkbox(shaman_window, "Auto Healing Stream Totem", {value=false}, 290)
-            render_checkbox(shaman_window, "Auto Mana Spring Totem", {value=false}, 320)
-            render_checkbox(shaman_window, "Auto Tremor Totem", {value=false}, 350)
+            render_checkbox(shaman_window, "Auto Stoneskin Totem", {value=false}, 260)
+            render_checkbox(shaman_window, "Auto Strength of Earth", {value=false}, 290)
+            render_checkbox(shaman_window, "Auto Healing Stream Totem", {value=false}, 320)
+            render_checkbox(shaman_window, "Auto Mana Spring Totem", {value=false}, 350)
+            render_checkbox(shaman_window, "Auto Tremor Totem", {value=false}, 380)
 
-            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 385), color.white(180), "Weapon Imbues")
+            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 415), color.white(180), "Weapon Imbues")
             if shaman_window.add_separator then
-                shaman_window:add_separator(3.0, 3.0, 400.0, 0.0, color.white(40))
+                shaman_window:add_separator(3.0, 3.0, 430.0, 0.0, color.white(40))
             end
-            render_weapon_imbue_radio(shaman_window, 415)
+            render_weapon_imbue_radio(shaman_window, 445)
 
-            local util_y = 540
+            local util_y = 570
             shaman_window:render_text(FONT_SMALL, vec2.new(25, util_y), color.white(120), "Coming soon: Advanced DPS options, PvP tools, CC chain, etc.")
         end
     )
@@ -486,4 +548,12 @@ end)
     - To add more healing logic (ex: more ranks, Chain Heal, etc), expand the logic inside shaman_healer_logic().
     - There is NO healer UI/window. All healer logic is now fully automatic, driven only by code.
     - Main window UI controls toggles and weapon imbues only.
+
+    ==========================================
+    === SOLO LEVELING DPS LOGIC (NEW)       ==
+    ==========================================
+    - Toggle the "Solo Leveling DPS Logic" checkbox in the Shaman UI to enable/disable DPS/leveling logic.
+    - DPS logic will prioritize Flame Shock > Earth Shock on nearest enemy.
+    - Lightning Bolt and Lightning Shield are not included in the solo DPS logic.
+    - Imbue spells are controlled by the "Auto Weapon Imbue" checkboxes.
 --]]
