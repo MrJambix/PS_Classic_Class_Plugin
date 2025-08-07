@@ -22,33 +22,24 @@ local cooldown_tracker = require("common/utility/cooldown_tracker")
 local auto_attack_helper = require("common/utility/auto_attack_helper")
 local profiler = require("common/modules/profiler")
 
--- === SHAMAN SPELL IDS ===
-local SPELLS = {
-    Berserking = 20554,
-    ChainLightning = 421,
-    EarthShock = 8042,
-    EarthShockRank1 = 8042,
-    FlameShock = 8050,
-    FrostShock = 8056,
-    LightningBolt = 403,
-    Purge = 370,
-    LightningShield = 324,
-    AncestralSpirit = 2008,
-    CureDisease = 2870,
-    CurePoison = 526,
-    NaturesSwiftness = 16188,
-    ChainHeal = 1064,
-    BloodFury = 20572,
-    BloodFuryOrc = 23230,
-    BloodFuryTroll = 23234,
-    TremorTotem = 8143,
-}
+-- === SHAMAN SPELL IDS (BY RANK) ===
+local SPELLS = {}
 
-local SPELL_BUFFS = {
-    Berserking = 26635,
-    BloodFury = 23234,
-    TremorTotem = 8143,
-}
+SPELLS.Berserking           = { [1] = 20554 }
+SPELLS.ChainLightning       = { [1]=421, [2]=930, [3]=2860, [4]=10605, [5]=25442 }
+SPELLS.EarthShock           = { [1]=8042, [2]=8044, [3]=8045, [4]=10412, [5]=10413, [6]=10414, [7]=25454 }
+SPELLS.FlameShock           = { [1]=8050, [2]=8052, [3]=8053, [4]=10447, [5]=10448, [6]=29228, [7]=25457 }
+SPELLS.FrostShock           = { [1]=8056, [2]=8058, [3]=10472, [4]=10473, [5]=25464 }
+SPELLS.LightningBolt        = { [1]=403, [2]=529, [3]=548, [4]=915, [5]=943, [6]=6041, [7]=10391, [8]=10392, [9]=15207, [10]=15208, [11]=25449 }
+SPELLS.Purge                = { [1]=370, [2]=8012 }
+SPELLS.LightningShield      = { [1]=324, [2]=325, [3]=905, [4]=945, [5]=8134, [6]=10431, [7]=10432, [8]=25469 }
+SPELLS.AncestralSpirit      = { [1]=2008, [2]=20609, [3]=20610, [4]=20776 }
+SPELLS.CureDisease          = { [1]=2870 }
+SPELLS.CurePoison           = { [1]=526 }
+SPELLS.NaturesSwiftness     = { [1]=16188 }
+SPELLS.ChainHeal            = { [1]=1064, [2]=10622, [3]=10623, [4]=25423 }
+SPELLS.BloodFury            = { [1]=20572, [2]=23230, [3]=23234 }
+SPELLS.TremorTotem          = { [1]=8143 }
 
 -- === SHAMAN IMBUE RANKS (for auto weapon imbue) ===
 local rockbiter_ranks = {
@@ -69,20 +60,11 @@ local frostbrand_ranks = {
     { spell = 8033, enchant = 2 },
 }
 
--- === SHAMAN HEAL SPELLS ===
-local HEALING_WAVE_RANKS = {
-    [1] = 331,
-    [2] = 332,
-    [3] = 547,
-    [4] = 913,
-    [5] = 939,
-}
-local LESSER_HEALING_WAVE_RANKS = {
-    [1] = 8004,
-}
-local CHAIN_HEAL_RANKS = {
-    [1] = 1064,
-    [3] = 25423,
+-- === SHAMAN BUFFS ===
+local SPELL_BUFFS = {
+    Berserking = 26635,
+    BloodFury = 23234,
+    TremorTotem = 8143,
 }
 
 -- === UI Checkbox State Tables (For main window only) ===
@@ -131,10 +113,10 @@ end
 local function can_apply_lightning_shield()
     if not auto_lightning_shield.value then return false end
     local player = get_local_player()
-    if not player or not spell_helper:has_spell_equipped(SPELLS.LightningShield) then return false end
+    if not player or not spell_helper:has_spell_equipped(SPELLS.LightningShield[1]) then return false end
     local buffs = player.get_buffs and player:get_buffs() or {}
     for _, buff in ipairs(buffs) do
-        if buff.buff_id == SPELLS.LightningShield then return false end
+        if buff.buff_id == SPELLS.LightningShield[1] then return false end
     end
     return true
 end
@@ -198,8 +180,9 @@ end
 
 local function try_blood_fury(player, target)
     -- Use the proper health percent logic: 0.0 to 1.0
-    if not spell_helper:has_spell_equipped(SPELLS.BloodFury)
-        or spell_helper:is_spell_on_cooldown(SPELLS.BloodFury)
+    local blood_fury_id = SPELLS.BloodFury[1]
+    if not spell_helper:has_spell_equipped(blood_fury_id)
+        or spell_helper:is_spell_on_cooldown(blood_fury_id)
         or has_blood_fury_buff(player)
     then
         return
@@ -211,7 +194,7 @@ local function try_blood_fury(player, target)
     if not unit_helper:is_valid_enemy(target) then return end
     if not unit_helper:is_in_combat(target) then return end
     if target_hp < 0.5 then return end -- only if target > 50%
-    spell_queue:queue_spell_target(SPELLS.BloodFury, player, 1, "Blood Fury (Orc/Troll Racial)")
+    spell_queue:queue_spell_target(blood_fury_id, player, 1, "Blood Fury (Orc/Troll Racial)")
 end
 
 -- === Fears/Sleep Spell Detection (for Tremor Totem) ===
@@ -240,8 +223,9 @@ local function auto_tremor_totem_logic()
     if not auto_tremor_totem.value then return end
     local player = get_local_player()
     if not player then return end
-    if not spell_helper:has_spell_equipped(SPELLS.TremorTotem) then return end
-    if spell_helper:is_spell_on_cooldown(SPELLS.TremorTotem) then return end
+    local tremor_id = SPELLS.TremorTotem[1]
+    if not spell_helper:has_spell_equipped(tremor_id) then return end
+    if spell_helper:is_spell_on_cooldown(tremor_id) then return end
     if has_tremor_totem(player) then return end
 
     local allies = unit_helper:get_ally_list_around(player:get_position(), 60, true, true, false)
@@ -264,7 +248,7 @@ local function auto_tremor_totem_logic()
         end
     end
     if found then
-        spell_queue:queue_spell_target(SPELLS.TremorTotem, player, 2, "Auto Tremor Totem")
+        spell_queue:queue_spell_target(tremor_id, player, 2, "Auto Tremor Totem")
     end
 end
 
@@ -291,14 +275,15 @@ local function interrupt_logic()
             end
         end
     end
+    local earth_shock_r1 = SPELLS.EarthShock[1]
     if interrupt_target then
-        if spell_helper:has_spell_equipped(SPELLS.EarthShockRank1)
-            and not spell_helper:is_spell_on_cooldown(SPELLS.EarthShockRank1)
-            and spell_helper:is_spell_in_range(SPELLS.EarthShockRank1, player, interrupt_target:get_position(), player:get_position(), interrupt_target:get_position())
-            and spell_helper:is_spell_in_line_of_sight(SPELLS.EarthShockRank1, player, interrupt_target)
+        if spell_helper:has_spell_equipped(earth_shock_r1)
+            and not spell_helper:is_spell_on_cooldown(earth_shock_r1)
+            and spell_helper:is_spell_in_range(earth_shock_r1, player, interrupt_target:get_position(), player:get_position(), interrupt_target:get_position())
+            and spell_helper:is_spell_in_line_of_sight(earth_shock_r1, player, interrupt_target)
         then
             profiler.start("Interrupt")
-            spell_queue:queue_spell_target(SPELLS.EarthShockRank1, interrupt_target, 1, "Auto Interrupt: Earth Shock R1")
+            spell_queue:queue_spell_target(earth_shock_r1, interrupt_target, 1, "Auto Interrupt: Earth Shock R1")
             profiler.stop("Interrupt")
             return
         end
@@ -306,7 +291,6 @@ local function interrupt_logic()
 end
 
 -- === HEALER LOGIC (no UI, all logic is internal/automatic) ===
-
 local function percent_health(unit)
     -- Returns health percent as 0-100 (for old code compatibility)
     return (unit_helper:get_health_percentage(unit) or 1) * 100
@@ -335,23 +319,33 @@ local function shaman_healer_logic()
     for _, ally in ipairs(allies) do
         if percent_health(ally) < 70 then injured_count = injured_count + 1 end
     end
+    -- Use highest chain heal rank available
+    local chain_heal_ranks = SPELLS.ChainHeal
     if injured_count >= 3 then
-        if can_cast_heal(CHAIN_HEAL_RANKS[3], target) then
-            spell_queue:queue_spell_target(CHAIN_HEAL_RANKS[3], target, 1, "Chain Heal (R3)")
+        if can_cast_heal(chain_heal_ranks[4], target) then
+            spell_queue:queue_spell_target(chain_heal_ranks[4], target, 1, "Chain Heal (Max)")
             return
-        elseif can_cast_heal(CHAIN_HEAL_RANKS[1], target) then
-            spell_queue:queue_spell_target(CHAIN_HEAL_RANKS[1], target, 1, "Chain Heal (R1)")
+        elseif can_cast_heal(chain_heal_ranks[3], target) then
+            spell_queue:queue_spell_target(chain_heal_ranks[3], target, 1, "Chain Heal (R3)")
+            return
+        elseif can_cast_heal(chain_heal_ranks[2], target) then
+            spell_queue:queue_spell_target(chain_heal_ranks[2], target, 1, "Chain Heal (R2)")
+            return
+        elseif can_cast_heal(chain_heal_ranks[1], target) then
+            spell_queue:queue_spell_target(chain_heal_ranks[1], target, 1, "Chain Heal (R1)")
             return
         end
     end
-    if hp < 40 and can_cast_heal(HEALING_WAVE_RANKS[5], target) then
-        spell_queue:queue_spell_target(HEALING_WAVE_RANKS[5], target, 1, "Healing Wave R5")
+    -- Healing Wave logic
+    local healing_wave_ranks = { [1]=331, [2]=332, [3]=547, [4]=913, [5]=939 }
+    if hp < 40 and can_cast_heal(healing_wave_ranks[5], target) then
+        spell_queue:queue_spell_target(healing_wave_ranks[5], target, 1, "Healing Wave R5")
         return
-    elseif hp < 70 and can_cast_heal(HEALING_WAVE_RANKS[4], target) then
-        spell_queue:queue_spell_target(HEALING_WAVE_RANKS[4], target, 1, "Healing Wave R4")
+    elseif hp < 70 and can_cast_heal(healing_wave_ranks[4], target) then
+        spell_queue:queue_spell_target(healing_wave_ranks[4], target, 1, "Healing Wave R4")
         return
-    elseif hp < 90 and can_cast_heal(HEALING_WAVE_RANKS[1], target) then
-        spell_queue:queue_spell_target(HEALING_WAVE_RANKS[1], target, 1, "Healing Wave R1 (cheap/Ancestral Healing)")
+    elseif hp < 90 and can_cast_heal(healing_wave_ranks[1], target) then
+        spell_queue:queue_spell_target(healing_wave_ranks[1], target, 1, "Healing Wave R1 (cheap/Ancestral Healing)")
         return
     end
 end
@@ -364,8 +358,8 @@ local function shaman_rotation_logic()
     auto_tremor_totem_logic()
     interrupt_logic()
 
-    if auto_lightning_shield.value and can_apply_lightning_shield() and spell_helper:has_spell_equipped(SPELLS.LightningShield) then
-        spell_queue:queue_spell_target(SPELLS.LightningShield, player, 2, "Auto Lightning Shield")
+    if auto_lightning_shield.value and can_apply_lightning_shield() and spell_helper:has_spell_equipped(SPELLS.LightningShield[1]) then
+        spell_queue:queue_spell_target(SPELLS.LightningShield[1], player, 2, "Auto Lightning Shield")
         return
     end
 
@@ -426,24 +420,31 @@ local function shaman_rotation_logic()
                     safe_cast = false
                 end
             end
-            if safe_cast then
-                if spell_helper:has_spell_equipped(SPELLS.FlameShock)
-                    and not spell_helper:is_spell_on_cooldown(SPELLS.FlameShock)
-                    and spell_helper:is_spell_in_range(SPELLS.FlameShock, player, target:get_position(), player:get_position(), target:get_position())
-                    and spell_helper:is_spell_in_line_of_sight(SPELLS.FlameShock, player, target)
+            -- Use highest available Flame Shock then Earth Shock
+            local flame_shock_ranks = SPELLS.FlameShock
+            local earth_shock_ranks = SPELLS.EarthShock
+            for i = #flame_shock_ranks, 1, -1 do
+                local flame_id = flame_shock_ranks[i]
+                if flame_id and spell_helper:has_spell_equipped(flame_id)
+                    and not spell_helper:is_spell_on_cooldown(flame_id)
+                    and spell_helper:is_spell_in_range(flame_id, player, target:get_position(), player:get_position(), target:get_position())
+                    and spell_helper:is_spell_in_line_of_sight(flame_id, player, target)
                 then
                     profiler.start("FlameShock")
-                    spell_queue:queue_spell_target(SPELLS.FlameShock, target, 1, "Solo Leveling DPS: Flame Shock")
+                    spell_queue:queue_spell_target(flame_id, target, 1, "Solo Leveling DPS: Flame Shock")
                     profiler.stop("FlameShock")
                     return
                 end
-                if spell_helper:has_spell_equipped(SPELLS.EarthShock)
-                    and not spell_helper:is_spell_on_cooldown(SPELLS.EarthShock)
-                    and spell_helper:is_spell_in_range(SPELLS.EarthShock, player, target:get_position(), player:get_position(), target:get_position())
-                    and spell_helper:is_spell_in_line_of_sight(SPELLS.EarthShock, player, target)
+            end
+            for i = #earth_shock_ranks, 1, -1 do
+                local earth_id = earth_shock_ranks[i]
+                if earth_id and spell_helper:has_spell_equipped(earth_id)
+                    and not spell_helper:is_spell_on_cooldown(earth_id)
+                    and spell_helper:is_spell_in_range(earth_id, player, target:get_position(), player:get_position(), target:get_position())
+                    and spell_helper:is_spell_in_line_of_sight(earth_id, player, target)
                 then
                     profiler.start("EarthShock")
-                    spell_queue:queue_spell_target(SPELLS.EarthShock, target, 1, "Solo Leveling DPS: Earth Shock")
+                    spell_queue:queue_spell_target(earth_id, target, 1, "Solo Leveling DPS: Earth Shock")
                     profiler.stop("EarthShock")
                     return
                 end
@@ -572,7 +573,6 @@ core.register_on_render_window_callback(function()
             render_checkbox(shaman_window, "Auto Strength of Earth", {value=false}, 385)
             render_checkbox(shaman_window, "Auto Healing Stream Totem", {value=false}, 415)
             render_checkbox(shaman_window, "Auto Mana Spring Totem", {value=false}, 445)
-            -- Tremor handled in Utility now
 
             shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 480), color.white(180), "Weapon Imbues")
             if shaman_window.add_separator then
@@ -599,7 +599,7 @@ end)
     === SOLO LEVELING DPS LOGIC (NEW)       ==
     ==========================================
     - Toggle the "Solo Leveling DPS Logic" checkbox in the Shaman UI to enable/disable DPS/leveling logic.
-    - DPS logic will prioritize Flame Shock > Earth Shock on nearest enemy IN COMBAT with you.
+    - DPS logic will prioritize highest rank Flame Shock > Earth Shock on nearest enemy IN COMBAT with you.
     - Lightning Bolt and Lightning Shield are not included in the solo DPS logic.
     - Imbue spells are controlled by the "Auto Weapon Imbue" checkboxes.
 
