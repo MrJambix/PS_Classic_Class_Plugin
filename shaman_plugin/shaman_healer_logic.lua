@@ -17,15 +17,26 @@ local function can_cast_heal(spell_id, target)
     return true
 end
 
+local function get_group_members(player)
+    local members = {}
+    if core.raid and core.raid.get_raid_members then
+        local raid = core.raid:get_raid_members()
+        for _, unit in ipairs(raid) do table.insert(members, unit) end
+    elseif core.party and core.party.get_party_members then
+        local party = core.party:get_party_members()
+        for _, unit in ipairs(party) do table.insert(members, unit) end
+    end
+    table.insert(members, player)
+    return members
+end
+
 local function run()
     local player = core.object_manager.get_local_player()
     if not player then return end
 
-    local party_members = core.party and core.party.get_party_members and core.party:get_party_members() or {}
-    table.insert(party_members, player)
-
+    local group_members = get_group_members(player)
     local heal_targets = {}
-    for _, unit in ipairs(party_members) do
+    for _, unit in ipairs(group_members) do
         if unit and not unit:is_dead() and (not unit.is_ghost or not unit:is_ghost()) then
             table.insert(heal_targets, unit)
         end

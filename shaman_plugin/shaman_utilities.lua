@@ -1,4 +1,3 @@
-local core = _G.core
 local spell_helper = require("common/utility/spell_helper")
 local spell_queue = require("common/modules/spell_queue")
 local shaman_data = require("shaman_spells_buffs")
