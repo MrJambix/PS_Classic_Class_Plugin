@@ -3,6 +3,9 @@
 -- Solo Leveling DPS logic only fires if player is in combat with a target
 -- Lightning Bolt REMOVED from DPS, Lightning Shield only handled by Auto Lightning Shield toggle
 -- Imbuements only maintained if enabled in "Auto Weapon Imbue"
+-- Auto Interrupt logic using Earth Shock Rank 1, Utility category in UI
+-- Blood Fury included (Orc/Troll Racials), used for melee burst
+-- Auto Tremor Totem: detects fear/sleep spells and debuffs
 
 local core = _G.core
 local menu = core.menu
@@ -24,10 +27,10 @@ local SPELLS = {
     Berserking = 20554,
     ChainLightning = 421,
     EarthShock = 8042,
-    EarthShockHighest = 8042,
+    EarthShockRank1 = 8042,
     FlameShock = 8050,
     FrostShock = 8056,
-    LightningBolt = 403,  -- (WILL REMOVE IN FUTURE UPDATE, not used in DPS)
+    LightningBolt = 403,
     Purge = 370,
     LightningShield = 324,
     AncestralSpirit = 2008,
@@ -35,11 +38,16 @@ local SPELLS = {
     CurePoison = 526,
     NaturesSwiftness = 16188,
     ChainHeal = 1064,
+    BloodFury = 20572,
+    BloodFuryOrc = 23230,
+    BloodFuryTroll = 23234,
+    TremorTotem = 8143,
 }
 
--- === SHAMAN SPELL BUFF IDS  ===
 local SPELL_BUFFS = {
-    Berserking = 26635,    -- Buff applied by Berserking
+    Berserking = 26635,
+    BloodFury = 23234,
+    TremorTotem = 8143,
 }
 
 -- === SHAMAN IMBUE RANKS (for auto weapon imbue) ===
@@ -53,102 +61,29 @@ local windfury_ranks = {
     { spell = 8232, enchant = 283 },
 }
 local flametongue_ranks = {
-    { spell = 8030, enchant = 3 },  -- Rank 3
-    { spell = 8027, enchant = 4 },  -- Rank 2
-    { spell = 8024, enchant = 5 },  -- Rank 1
+    { spell = 8030, enchant = 3 },
+    { spell = 8027, enchant = 4 },
+    { spell = 8024, enchant = 5 },
 }
 local frostbrand_ranks = {
-    { spell = 8033, enchant = 2 },  -- Rank 1
+    { spell = 8033, enchant = 2 },
 }
 
 -- === SHAMAN HEAL SPELLS ===
 local HEALING_WAVE_RANKS = {
-    [1] = 331,  -- Rank 1
-    [2] = 332,  -- Rank 2
-    [3] = 547,  -- Rank 3
-    [4] = 913,  -- Rank 4
-    [5] = 939,  -- Rank 5
+    [1] = 331,
+    [2] = 332,
+    [3] = 547,
+    [4] = 913,
+    [5] = 939,
 }
 local LESSER_HEALING_WAVE_RANKS = {
-    [1] = 8004,  -- Rank 1
+    [1] = 8004,
 }
 local CHAIN_HEAL_RANKS = {
     [1] = 1064,
     [3] = 25423,
 }
-
--- === SHAMAN TOTEMS ===
-
--- === EARTH TOTEMS ===
-local STONESKIN_TOTEM_RANKS = {
-    [1] = 8071,
-    [2] = 8154,
-    [3] = 8155,
-}
-local STONESKIN_BUFFS = {
-    [1] = 8072,
-    [2] = 8156,
-    [3] = 8157,
-}
-
-local STRENGTH_OF_EARTH_TOTEM_RANKS = {
-    [1] = 8075,
-    [2] = 8160,
-}
-local STRENGTH_OF_EARTH_BUFFS = {
-    [1] = 8076,
-    [2] = 8162,
-}
-
-local EARTHBIND_TOTEM_RANKS = {
-    [1] = 2484,
-}
-local STONECLAW_TOTEM_RANKS = {
-    [1] = 5730,
-    [2] = 6390,
-}
-local TREMOR_TOTEM_RANKS = {
-    [1] = 8143,
-}
-
--- === FIRE TOTEMS ===
-local SEARING_TOTEM_RANKS = {
-    [1] = 3599,
-    [2] = 6363,
-}
-local FIRE_NOVA_TOTEM_RANKS = {
-    [1] = 1535,
-    [2] = 8498,
-}
-local MAGMA_TOTEM_RANKS = {
-    [1] = 8190,
-}
-
--- === WATER TOTEMS ===
-local HEALING_STREAM_TOTEM_RANKS = {
-    [1] = 5394,
-}
-local HEALING_STREAM_BUFFS = {
-    [1] = 5672,
-}
-local MANA_SPRING_TOTEM_RANKS = {
-    [1] = 5675,
-}
-local MANA_SPRING_BUFFS = {
-    [1] = 5677,
-}
-local POISON_CLEANSING_TOTEM_RANKS = {
-    [1] = 8166,
-}
-local FROST_RESISTANCE_TOTEM_RANKS = {
-    [1] = 8181,
-}
-local FROST_RESISTANCE_BUFFS = {
-    [1] = 8182,
-}
-
--- === WIND TOTEMS ===
--- (None implemented, add as discovered)
 
 -- === UI Checkbox State Tables (For main window only) ===
 local weapon_imbues = {
@@ -161,7 +96,9 @@ local weapon_imbue_state = { windfury = false, flametongue = false, rockbiter = 
 
 local enable_rotation = menu.checkbox(false, "enable_shaman_rotation")
 local enable_logger = menu.checkbox(false, "enable_logger")
+local auto_interrupt = { value = false }
 local auto_lightning_shield = { value = false }
+local auto_tremor_totem = { value = false }
 local healer_mode = { value = false }
 local allow_potions = { value = false }
 local allow_ooc_heal = { value = false }
@@ -248,13 +185,131 @@ core.register_on_render_menu_callback(function()
     end)
 end)
 
--- === HEALER LOGIC (no UI, all logic is internal/automatic, PvE downranking) ===
+-- === Blood Fury Usage Logic ===
+local function has_blood_fury_buff(player)
+    local buffs = player.get_buffs and player:get_buffs() or {}
+    for _, buff in ipairs(buffs) do
+        if buff.buff_id == SPELL_BUFFS.BloodFury then
+            return true
+        end
+    end
+    return false
+end
+
+local function try_blood_fury(player, target)
+    -- Use the proper health percent logic: 0.0 to 1.0
+    if not spell_helper:has_spell_equipped(SPELLS.BloodFury)
+        or spell_helper:is_spell_on_cooldown(SPELLS.BloodFury)
+        or has_blood_fury_buff(player)
+    then
+        return
+    end
+    local player_hp = unit_helper:get_health_percentage(player) or 1
+    local target_hp = unit_helper:get_health_percentage(target) or 1
+    if player_hp < 0.5 then return end -- don't use below 50%
+    if not target or target:is_dead() then return end
+    if not unit_helper:is_valid_enemy(target) then return end
+    if not unit_helper:is_in_combat(target) then return end
+    if target_hp < 0.5 then return end -- only if target > 50%
+    spell_queue:queue_spell_target(SPELLS.BloodFury, player, 1, "Blood Fury (Orc/Troll Racial)")
+end
+
+-- === Fears/Sleep Spell Detection (for Tremor Totem) ===
+local FEAR_SLEEP_KEYWORDS = { "fear", "terror", "scream", "horrify", "panic", "dread", "sleep" }
+local function is_fear_or_sleep_spell(spell_name)
+    spell_name = spell_name:lower()
+    for _, keyword in ipairs(FEAR_SLEEP_KEYWORDS) do
+        if spell_name:find(keyword) then
+            return true
+        end
+    end
+    return false
+end
+
+local function has_tremor_totem(player)
+    local buffs = player.get_buffs and player:get_buffs() or {}
+    for _, buff in ipairs(buffs) do
+        if buff.buff_id == SPELL_BUFFS.TremorTotem then
+            return true
+        end
+    end
+    return false
+end
+
+local function auto_tremor_totem_logic()
+    if not auto_tremor_totem.value then return end
+    local player = get_local_player()
+    if not player then return end
+    if not spell_helper:has_spell_equipped(SPELLS.TremorTotem) then return end
+    if spell_helper:is_spell_on_cooldown(SPELLS.TremorTotem) then return end
+    if has_tremor_totem(player) then return end
+
+    local allies = unit_helper:get_ally_list_around(player:get_position(), 60, true, true, false)
+    table.insert(allies, player)
+    local found = false
+    for _, ally in ipairs(allies) do
+        local buffs = ally.get_buffs and ally:get_buffs() or {}
+        for _, buff in ipairs(buffs) do
+            if is_fear_or_sleep_spell(buff.buff_name or "") then
+                found = true
+                break
+            end
+        end
+        if found then break end
+
+        local cast_info = ally.get_cast_info and ally:get_cast_info()
+        if cast_info and cast_info.is_casting and is_fear_or_sleep_spell(cast_info.spell_name or "") then
+            found = true
+            break
+        end
+    end
+    if found then
+        spell_queue:queue_spell_target(SPELLS.TremorTotem, player, 2, "Auto Tremor Totem")
+    end
+end
+
+-- === Interrupt Logic ===
+local function interrupt_logic()
+    if not auto_interrupt.value then return end
+    local player = get_local_player()
+    if not player then return end
+    local enemies = unit_helper:get_enemy_list_around(player:get_position(), 30, true, false, false, false)
+    local interrupt_target = nil
+    local highest_priority = nil
+    for _, unit in ipairs(enemies) do
+        if unit_helper:is_valid_enemy(unit) and not unit:is_dead() and not unit_helper:is_dummy(unit) then
+            local cast_info = unit.get_cast_info and unit:get_cast_info()
+            if cast_info and cast_info.is_casting and not cast_info.is_uninterruptible then
+                local spell_name = cast_info.spell_name or ""
+                local spell_type = cast_info.spell_type or ""
+                if (spell_type == "HEAL" or spell_name:lower():find("heal")) then
+                    interrupt_target, highest_priority = unit, 1
+                    break
+                elseif (spell_type == "CC" or spell_name:lower():find("fear") or spell_name:lower():find("polymorph") or spell_name:lower():find("sleep")) and not highest_priority then
+                    interrupt_target, highest_priority = unit, 2
+                end
+            end
+        end
+    end
+    if interrupt_target then
+        if spell_helper:has_spell_equipped(SPELLS.EarthShockRank1)
+            and not spell_helper:is_spell_on_cooldown(SPELLS.EarthShockRank1)
+            and spell_helper:is_spell_in_range(SPELLS.EarthShockRank1, player, interrupt_target:get_position(), player:get_position(), interrupt_target:get_position())
+            and spell_helper:is_spell_in_line_of_sight(SPELLS.EarthShockRank1, player, interrupt_target)
+        then
+            profiler.start("Interrupt")
+            spell_queue:queue_spell_target(SPELLS.EarthShockRank1, interrupt_target, 1, "Auto Interrupt: Earth Shock R1")
+            profiler.stop("Interrupt")
+            return
+        end
+    end
+end
+
+-- === HEALER LOGIC (no UI, all logic is internal/automatic) ===
 
 local function percent_health(unit)
-    if not unit then return 100 end
-    local max = unit.get_max_health and unit:get_max_health() or 1
-    local hp = unit.get_health and unit:get_health() or 1
-    return (hp / max) * 100
+    -- Returns health percent as 0-100 (for old code compatibility)
+    return (unit_helper:get_health_percentage(unit) or 1) * 100
 end
 
 local function can_cast_heal(spell_id, target)
@@ -270,17 +325,12 @@ end
 local function shaman_healer_logic()
     local player = get_local_player()
     if not player then return end
-
-    -- 1. Find all nearby allies (including self)
     local allies = unit_helper:get_ally_list_around(player:get_position(), 100, true, true, false) or {}
     table.insert(allies, player)
     table.sort(allies, function(a, b) return percent_health(a) < percent_health(b) end)
     local target = allies[1]
     if not target or target:is_dead() or (target.is_ghost and target:is_ghost()) then return end
-
     local hp = percent_health(target)
-
-    -- 2. Group healing: If 3+ allies below 70%, prefer Chain Heal 3 or 1
     local injured_count = 0
     for _, ally in ipairs(allies) do
         if percent_health(ally) < 70 then injured_count = injured_count + 1 end
@@ -294,8 +344,6 @@ local function shaman_healer_logic()
             return
         end
     end
-
-    -- 3. Single-target downranking (edit thresholds below to tune behavior)
     if hp < 40 and can_cast_heal(HEALING_WAVE_RANKS[5], target) then
         spell_queue:queue_spell_target(HEALING_WAVE_RANKS[5], target, 1, "Healing Wave R5")
         return
@@ -306,8 +354,6 @@ local function shaman_healer_logic()
         spell_queue:queue_spell_target(HEALING_WAVE_RANKS[1], target, 1, "Healing Wave R1 (cheap/Ancestral Healing)")
         return
     end
-
-    -- 4. Mana regen: If no one needs healing, do nothing (allow 5s rule regen)
 end
 
 -- === DPS/ROTATION LOGIC ===
@@ -315,13 +361,14 @@ local function shaman_rotation_logic()
     local player = get_local_player()
     if not player then return end
 
-    -- === Auto Lightning Shield ===
-    if can_apply_lightning_shield() and spell_helper:has_spell_equipped(SPELLS.LightningShield) then
+    auto_tremor_totem_logic()
+    interrupt_logic()
+
+    if auto_lightning_shield.value and can_apply_lightning_shield() and spell_helper:has_spell_equipped(SPELLS.LightningShield) then
         spell_queue:queue_spell_target(SPELLS.LightningShield, player, 2, "Auto Lightning Shield")
         return
     end
 
-    -- === Auto Weapon Imbue ===
     local imbue_selected = false
     for k, v in pairs(weapon_imbue_state) do
         if v then imbue_selected = true break end
@@ -354,24 +401,23 @@ local function shaman_rotation_logic()
         end
     end
 
-    -- === SOLO LEVELING DPS LOGIC (ONLY IN COMBAT) ===
     if solo_leveling_dps.value then
-        -- Find a target we're currently in combat with
         local enemies = unit_helper:get_enemy_list_around(player:get_position(), 30, true, false, false, false)
         local target = nil
         for _, unit in ipairs(enemies) do
-           if unit_helper:is_valid_enemy(unit)
-    and not unit:is_dead()
-    and not unit_helper:is_dummy(unit)
-    and unit_helper:is_in_combat(unit)
-    and unit:is_in_combat()
-then
-    target = unit
-    break
-end
+            if unit_helper:is_valid_enemy(unit)
+                and not unit:is_dead()
+                and not unit_helper:is_dummy(unit)
+                and unit_helper:is_in_combat(unit)
+                and unit:is_in_combat()
+            then
+                target = unit
+                break
+            end
         end
         if target then
-            -- AutoAttack Helper: don't cast spells if next swing is within 0.3s
+            try_blood_fury(player, target) -- Try to use Blood Fury before burst
+
             local next_attack_time = auto_attack_helper:get_next_attack_core_time(player)
             local current_time = auto_attack_helper:get_current_combat_core_time()
             local safe_cast = true
@@ -381,7 +427,6 @@ end
                 end
             end
             if safe_cast then
-                -- Profiler integration
                 if spell_helper:has_spell_equipped(SPELLS.FlameShock)
                     and not spell_helper:is_spell_on_cooldown(SPELLS.FlameShock)
                     and spell_helper:is_spell_in_range(SPELLS.FlameShock, player, target:get_position(), player:get_position(), target:get_position())
@@ -407,7 +452,6 @@ end
     end
 end
 
--- === MAIN LOGIC ENTRYPOINT ===
 local function shaman_plugin_logic()
     if not enable_rotation:get_state() then return end
     if healer_mode.value then
@@ -417,8 +461,6 @@ local function shaman_plugin_logic()
     shaman_rotation_logic()
 end
 core.register_on_update_callback(shaman_plugin_logic)
-
--- === UI: Main Window Only (No Healer Window) ===
 
 local shaman_window = core.menu.window("Shaman Main Window")
 local window_position = {
@@ -512,26 +554,33 @@ core.register_on_render_window_callback(function()
             render_checkbox(shaman_window, "Healer Mode", healer_mode, 75)
             render_checkbox(shaman_window, "Allow Use of Potions", allow_potions, 105)
             render_checkbox(shaman_window, "Allow Out of Combat Healing", allow_ooc_heal, 135)
-            render_checkbox(shaman_window, "Auto Lightning Shield", auto_lightning_shield, 165)
-            render_checkbox(shaman_window, "Solo Leveling DPS Logic", solo_leveling_dps, 195)
+            render_checkbox(shaman_window, "Solo Leveling DPS Logic", solo_leveling_dps, 165)
 
-            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 230), color.white(180), "Totem Controls")
+            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 200), color.white(180), "Utility")
             if shaman_window.add_separator then
-                shaman_window:add_separator(3.0, 3.0, 245.0, 0.0, color.white(40))
+                shaman_window:add_separator(3.0, 3.0, 215.0, 0.0, color.white(40))
             end
-            render_checkbox(shaman_window, "Auto Stoneskin Totem", {value=false}, 260)
-            render_checkbox(shaman_window, "Auto Strength of Earth", {value=false}, 290)
-            render_checkbox(shaman_window, "Auto Healing Stream Totem", {value=false}, 320)
-            render_checkbox(shaman_window, "Auto Mana Spring Totem", {value=false}, 350)
-            render_checkbox(shaman_window, "Auto Tremor Totem", {value=false}, 380)
+            render_checkbox(shaman_window, "Auto Interrupt", auto_interrupt, 230)
+            render_checkbox(shaman_window, "Auto Lightning Shield", auto_lightning_shield, 260)
+            render_checkbox(shaman_window, "Auto Tremor Totem", auto_tremor_totem, 290)
 
-            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 415), color.white(180), "Weapon Imbues")
+            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 325), color.white(180), "Totem Controls")
             if shaman_window.add_separator then
-                shaman_window:add_separator(3.0, 3.0, 430.0, 0.0, color.white(40))
+                shaman_window:add_separator(3.0, 3.0, 340.0, 0.0, color.white(40))
             end
-            render_weapon_imbue_radio(shaman_window, 445)
+            render_checkbox(shaman_window, "Auto Stoneskin Totem", {value=false}, 355)
+            render_checkbox(shaman_window, "Auto Strength of Earth", {value=false}, 385)
+            render_checkbox(shaman_window, "Auto Healing Stream Totem", {value=false}, 415)
+            render_checkbox(shaman_window, "Auto Mana Spring Totem", {value=false}, 445)
+            -- Tremor handled in Utility now
 
-            local util_y = 570
+            shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 480), color.white(180), "Weapon Imbues")
+            if shaman_window.add_separator then
+                shaman_window:add_separator(3.0, 3.0, 495.0, 0.0, color.white(40))
+            end
+            render_weapon_imbue_radio(shaman_window, 510)
+
+            local util_y = 650
             shaman_window:render_text(FONT_SMALL, vec2.new(25, util_y), color.white(120), "Coming soon: Advanced DPS options, PvP tools, CC chain, etc.")
         end
     )
@@ -553,4 +602,23 @@ end)
     - DPS logic will prioritize Flame Shock > Earth Shock on nearest enemy IN COMBAT with you.
     - Lightning Bolt and Lightning Shield are not included in the solo DPS logic.
     - Imbue spells are controlled by the "Auto Weapon Imbue" checkboxes.
+
+    ==========================================
+    === AUTO INTERRUPT LOGIC (NEW)          ==
+    ==========================================
+    - Toggle "Auto Interrupt" in Utility section to enable automatic interrupts.
+    - Interrupt logic will use Earth Shock Rank 1 on enemy casts, prioritizing heals, then CCs.
+    - "Auto Lightning Shield" checkbox is now under Utility as well.
+
+    ==========================================
+    === BLOOD FURY (ORC/TROLL RACIAL)      ==
+    ==========================================
+    - Blood Fury is used for melee burst, as long as you're above 50% HP and the target is a valid enemy above 50% HP.
+    - Will not be used if you already have the buff or the spell is on cooldown.
+
+    ==========================================
+    === AUTO TREMOR TOTEM (NEW)            ==
+    ==========================================
+    - Detects party/self being feared or slept, or those spells being cast on them. Will drop Tremor Totem if needed.
+    - All Classic WoW era fear/sleep spells monitored by keywords: "fear", "terror", "scream", "horrify", "panic", "dread", "sleep"
 --]]
