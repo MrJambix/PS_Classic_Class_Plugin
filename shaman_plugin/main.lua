@@ -1,14 +1,8 @@
 -- === Project Sylvanas Shaman Plugin ===
--- Main.lua, NO Healer UI Window, only internal healer logic, and comments
--- Advanced Healer Mode: integrates target_selector and health_prediction APIs
--- Logs mode activation/deactivation for Healer Mode and Solo Leveling DPS Logic
--- Healing logic restricted to self and party members only
--- Now uses shaman_spells_buffs.lua for all spell/buff tables
 
 local core = _G.core
 local menu = core.menu
 
--- === MODULES ===
 local color = require("common/color")
 local vec2 = require("common/geometry/vector_2")
 local enums = require("common/enums")
@@ -16,13 +10,12 @@ local spell_queue = require("common/modules/spell_queue")
 local buff_manager = require("common/modules/buff_manager")
 local spell_helper = require("common/utility/spell_helper")
 local unit_helper = require("common/utility/unit_helper")
-local cooldown_tracker = require("common/utility/cooldown_tracker")
+--local cooldown_tracker = require("common/utility/cooldown_tracker")   -- moved to shaman_healer_logic.lua
 local auto_attack_helper = require("common/utility/auto_attack_helper")
 local profiler = require("common/modules/profiler")
 local target_selector = require("common/modules/target_selector")
 local health_prediction = require("common/modules/health_prediction")
 
--- === SHAMAN SPELLS & BUFFS TABLES ===
 local shaman_data = require("shaman_spells_buffs")
 local SPELLS = shaman_data.SPELLS
 local rockbiter_ranks = shaman_data.rockbiter_ranks
@@ -31,7 +24,10 @@ local flametongue_ranks = shaman_data.flametongue_ranks
 local frostbrand_ranks = shaman_data.frostbrand_ranks
 local SPELL_BUFFS = shaman_data.SPELL_BUFFS
 
--- === UI Checkbox State Tables (For main window only) ===
+local enhancement_dps_logic = require("enhancement_dps_logic")
+local healer_logic = require("shaman_healer_logic")
+local shaman_utils = require("shaman_utilities")
+
 local weapon_imbues = {
     { label = "Auto Windfury Weapon", key = "windfury" },
     { label = "Auto Flametongue Weapon", key = "flametongue" },
@@ -48,46 +44,15 @@ local auto_tremor_totem = { value = false }
 local healer_mode = { value = false }
 local allow_potions = { value = false }
 local allow_ooc_heal = { value = false }
-local solo_leveling_dps = { value = false }
+local enhancement_dps = { value = false }
 
--- === Mode State Tracking for Logging ===
 local prev_healer_mode = healer_mode.value
-local prev_solo_leveling_dps = solo_leveling_dps.value
+local prev_enhancement_dps = enhancement_dps.value
 
 local FONT_SMALL = 1
 local FONT_MEDIUM = 1
 
--- === Helper Functions ===
-
 local function get_local_player() return core.object_manager.get_local_player() end
-
-local function get_highest_imbue_spell_and_enchant(imbue_ranks)
-    for _, v in ipairs(imbue_ranks) do
-        if spell_helper:has_spell_equipped(v.spell) then
-            return v.spell, v.enchant
-        end
-    end
-    return nil, nil
-end
-
-local function is_mainhand_imbued_with(player, enchant_id)
-    local mainhand = player.get_item_at_inventory_slot and player:get_item_at_inventory_slot(16)
-    if not mainhand or not mainhand.object then return false end
-    if not mainhand.object.item_has_enchant or not mainhand.object:item_has_enchant() then return false end
-    local existing = mainhand.object.item_enchant_id and mainhand.object:item_enchant_id()
-    return existing == enchant_id
-end
-
-local function can_apply_lightning_shield()
-    if not auto_lightning_shield.value then return false end
-    local player = get_local_player()
-    if not player or not spell_helper:has_spell_equipped(SPELLS.LightningShield[1]) then return false end
-    local buffs = player.get_buffs and player:get_buffs() or {}
-    for _, buff in ipairs(buffs) do
-        if buff.buff_id == SPELLS.LightningShield[1] then return false end
-    end
-    return true
-end
 
 -- Logger (buffs, spell cast, weapon enchant)
 local function log_player_buffs_and_mainhand()
@@ -134,35 +99,6 @@ core.register_on_render_menu_callback(function()
         end
     end)
 end)
-
--- === Blood Fury Usage Logic ===
-local function has_blood_fury_buff(player)
-    local buffs = player.get_buffs and player:get_buffs() or {}
-    for _, buff in ipairs(buffs) do
-        if buff.buff_id == SPELL_BUFFS.BloodFury then
-            return true
-        end
-    end
-    return false
-end
-
-local function try_blood_fury(player, target)
-    local blood_fury_id = SPELLS.BloodFury[1]
-    if not spell_helper:has_spell_equipped(blood_fury_id)
-        or spell_helper:is_spell_on_cooldown(blood_fury_id)
-        or has_blood_fury_buff(player)
-    then
-        return
-    end
-    local player_hp = unit_helper:get_health_percentage(player) or 1
-    local target_hp = unit_helper:get_health_percentage(target) or 1
-    if player_hp < 0.5 then return end
-    if not target or target:is_dead() then return end
-    if not unit_helper:is_valid_enemy(target) then return end
-    if not unit_helper:is_in_combat(target) then return end
-    if target_hp < 0.5 then return end
-    spell_queue:queue_spell_target(blood_fury_id, player, 1, "Blood Fury (Orc/Troll Racial)")
-end
 
 -- === Fears/Sleep Spell Detection (for Tremor Totem) ===
 local FEAR_SLEEP_KEYWORDS = { "fear", "terror", "scream", "horrify", "panic", "dread", "sleep" }
@@ -257,212 +193,7 @@ local function interrupt_logic()
     end
 end
 
--- === HEALER LOGIC (Advanced, internal/automatic, uses APIs, party/self only) ===
-local function percent_health(unit)
-    return (unit_helper:get_health_percentage(unit) or 1) * 100
-end
-
-local function can_cast_heal(spell_id, target)
-    local player = get_local_player()
-    if not spell_helper:has_spell_equipped(spell_id) then return false end
-    if not cooldown_tracker or not cooldown_tracker.is_spell_ready then return true end
-    if not cooldown_tracker:is_spell_ready(player, spell_id) then return false end
-    if not cooldown_tracker:is_spell_in_range(spell_id, player, target) then return false end
-    if not cooldown_tracker:is_spell_los(spell_id, player, target) then return false end
-    return true
-end
-
-local function shaman_healer_logic()
-    local player = get_local_player()
-    if not player then return end
-
-    -- Get list of party members (API may differ, adjust as needed)
-    local party_members = core.party and core.party.get_party_members and core.party:get_party_members() or {}
-    table.insert(party_members, player) -- Always include self
-
-    -- Filter for living/valid units only
-    local heal_targets = {}
-    for _, unit in ipairs(party_members) do
-        if unit and not unit:is_dead() and (not unit.is_ghost or not unit:is_ghost()) then
-            table.insert(heal_targets, unit)
-        end
-    end
-
-    -- Sort by lowest HP
-    table.sort(heal_targets, function(a, b) return percent_health(a) < percent_health(b) end)
-    local target = heal_targets[1]
-    if not target then return end
-
-    local hp = percent_health(target)
-    local injured_count = 0
-    for _, ally in ipairs(heal_targets) do
-        if percent_health(ally) < 70 then injured_count = injured_count + 1 end
-    end
-
-    -- Use health_prediction to check incoming damage on each target
-    local predicted_danger = {}
-    for i, ally in ipairs(heal_targets) do
-        local inc_damage = health_prediction:get_incoming_damage(ally, 2)
-        predicted_danger[i] = inc_damage or 0
-    end
-
-    -- Prioritize Chain Heal if 3+ injured allies or incoming damage to multiple
-    local chain_heal_ranks = SPELLS.ChainHeal
-    local chain_heal_target = nil
-    if injured_count >= 3 then
-        chain_heal_target = target
-    else
-        for i, ally in ipairs(heal_targets) do
-            if predicted_danger[i] > (ally:get_max_health() or 1000) * 0.25 then
-                chain_heal_target = ally
-                break
-            end
-        end
-    end
-    if chain_heal_target then
-        if can_cast_heal(chain_heal_ranks[4], chain_heal_target) then
-            spell_queue:queue_spell_target(chain_heal_ranks[4], chain_heal_target, 1, "Chain Heal (Max, API)")
-            return
-        elseif can_cast_heal(chain_heal_ranks[3], chain_heal_target) then
-            spell_queue:queue_spell_target(chain_heal_ranks[3], chain_heal_target, 1, "Chain Heal (R3, API)")
-            return
-        elseif can_cast_heal(chain_heal_ranks[2], chain_heal_target) then
-            spell_queue:queue_spell_target(chain_heal_ranks[2], chain_heal_target, 1, "Chain Heal (R2, API)")
-            return
-        elseif can_cast_heal(chain_heal_ranks[1], chain_heal_target) then
-            spell_queue:queue_spell_target(chain_heal_ranks[1], chain_heal_target, 1, "Chain Heal (R1, API)")
-            return
-        end
-    end
-
-    -- Healing Wave logic, using highest incoming damage prediction
-    local healing_wave_ranks = { [1]=331, [2]=332, [3]=547, [4]=913, [5]=939 }
-    local healing_target = target
-    local highest_predicted = hp
-    for i, ally in ipairs(heal_targets) do
-        local predicted = predicted_danger[i]
-        if predicted > (ally:get_max_health() or 1000) * 0.25 and percent_health(ally) < highest_predicted then
-            healing_target = ally
-            highest_predicted = percent_health(ally)
-        end
-    end
-    local hthp = percent_health(healing_target)
-    if hthp < 40 and can_cast_heal(healing_wave_ranks[5], healing_target) then
-        spell_queue:queue_spell_target(healing_wave_ranks[5], healing_target, 1, "Healing Wave R5 (API)")
-        return
-    elseif hthp < 70 and can_cast_heal(healing_wave_ranks[4], healing_target) then
-        spell_queue:queue_spell_target(healing_wave_ranks[4], healing_target, 1, "Healing Wave R4 (API)")
-        return
-    elseif hthp < 90 and can_cast_heal(healing_wave_ranks[1], healing_target) then
-        spell_queue:queue_spell_target(healing_wave_ranks[1], healing_target, 1, "Healing Wave R1 (API)")
-        return
-    end
-end
-
--- === DPS/ROTATION LOGIC ===
-local function shaman_rotation_logic()
-    local player = get_local_player()
-    if not player then return end
-
-    auto_tremor_totem_logic()
-    interrupt_logic()
-
-    if auto_lightning_shield.value and can_apply_lightning_shield() and spell_helper:has_spell_equipped(SPELLS.LightningShield[1]) then
-        spell_queue:queue_spell_target(SPELLS.LightningShield[1], player, 2, "Auto Lightning Shield")
-        return
-    end
-
-    local imbue_selected = false
-    for k, v in pairs(weapon_imbue_state) do
-        if v then imbue_selected = true break end
-    end
-    if imbue_selected then
-        if weapon_imbue_state["rockbiter"] then
-            local spell_id, enchant_id = get_highest_imbue_spell_and_enchant(rockbiter_ranks)
-            if spell_id and enchant_id and not is_mainhand_imbued_with(player, enchant_id) then
-                spell_queue:queue_spell_target(spell_id, player, 2, "Auto Imbue: Rockbiter")
-                return
-            end
-        elseif weapon_imbue_state["windfury"] then
-            local spell_id, enchant_id = get_highest_imbue_spell_and_enchant(windfury_ranks)
-            if spell_id and enchant_id and not is_mainhand_imbued_with(player, enchant_id) then
-                spell_queue:queue_spell_target(spell_id, player, 2, "Auto Imbue: Windfury")
-                return
-            end
-        elseif weapon_imbue_state["flametongue"] then
-            local spell_id, enchant_id = get_highest_imbue_spell_and_enchant(flametongue_ranks)
-            if spell_id and enchant_id and not is_mainhand_imbued_with(player, enchant_id) then
-                spell_queue:queue_spell_target(spell_id, player, 2, "Auto Imbue: Flametongue")
-                return
-            end
-        elseif weapon_imbue_state["frostbrand"] then
-            local spell_id, enchant_id = get_highest_imbue_spell_and_enchant(frostbrand_ranks)
-            if spell_id and enchant_id and not is_mainhand_imbued_with(player, enchant_id) then
-                spell_queue:queue_spell_target(spell_id, player, 2, "Auto Imbue: Frostbrand")
-                return
-            end
-        end
-    end
-
-    if solo_leveling_dps.value then
-        local enemies = unit_helper:get_enemy_list_around(player:get_position(), 30, true, false, false, false)
-        local target = nil
-        for _, unit in ipairs(enemies) do
-            if unit_helper:is_valid_enemy(unit)
-                and not unit:is_dead()
-                and not unit_helper:is_dummy(unit)
-                and unit_helper:is_in_combat(unit)
-                and unit:is_in_combat()
-            then
-                target = unit
-                break
-            end
-        end
-        if target then
-            try_blood_fury(player, target)
-
-            local next_attack_time = auto_attack_helper:get_next_attack_core_time(player)
-            local current_time = auto_attack_helper:get_current_combat_core_time()
-            local safe_cast = true
-            if next_attack_time and current_time then
-                if next_attack_time - current_time < 0.30 then
-                    safe_cast = false
-                end
-            end
-            local flame_shock_ranks = SPELLS.FlameShock
-            local earth_shock_ranks = SPELLS.EarthShock
-            for i = #flame_shock_ranks, 1, -1 do
-                local flame_id = flame_shock_ranks[i]
-                if flame_id and spell_helper:has_spell_equipped(flame_id)
-                    and not spell_helper:is_spell_on_cooldown(flame_id)
-                    and spell_helper:is_spell_in_range(flame_id, player, target:get_position(), player:get_position(), target:get_position())
-                    and spell_helper:is_spell_in_line_of_sight(flame_id, player, target)
-                then
-                    profiler.start("FlameShock")
-                    spell_queue:queue_spell_target(flame_id, target, 1, "Solo Leveling DPS: Flame Shock")
-                    profiler.stop("FlameShock")
-                    return
-                end
-            end
-            for i = #earth_shock_ranks, 1, -1 do
-                local earth_id = earth_shock_ranks[i]
-                if earth_id and spell_helper:has_spell_equipped(earth_id)
-                    and not spell_helper:is_spell_on_cooldown(earth_id)
-                    and spell_helper:is_spell_in_range(earth_id, player, target:get_position(), player:get_position(), target:get_position())
-                    and spell_helper:is_spell_in_line_of_sight(earth_id, player, target)
-                then
-                    profiler.start("EarthShock")
-                    spell_queue:queue_spell_target(earth_id, target, 1, "Solo Leveling DPS: Earth Shock")
-                    profiler.stop("EarthShock")
-                    return
-                end
-            end
-        end
-    end
-end
-
 local function shaman_plugin_logic()
-    -- Log toggles for mode activation/deactivation
     if healer_mode.value ~= prev_healer_mode then
         if healer_mode.value then
             core.log("[Shaman] Healer Mode Activated.")
@@ -472,21 +203,41 @@ local function shaman_plugin_logic()
         prev_healer_mode = healer_mode.value
     end
 
-    if solo_leveling_dps.value ~= prev_solo_leveling_dps then
-        if solo_leveling_dps.value then
-            core.log("[Shaman] Leveling DPS Logic Activated.")
+    if enhancement_dps.value ~= prev_enhancement_dps then
+        if enhancement_dps.value then
+            core.log("[Shaman] Enhancement DPS Logic Activated.")
         else
-            core.log("[Shaman] Leveling DPS Logic Deactivated.")
+            core.log("[Shaman] Enhancement DPS Logic Deactivated.")
         end
-        prev_solo_leveling_dps = solo_leveling_dps.value
+        prev_enhancement_dps = enhancement_dps.value
     end
 
     if not enable_rotation:get_state() then return end
+
+    -- Weapon imbue logic
+    if shaman_utils.auto_weapon_imbue_logic(weapon_imbue_state) then return end
+
+    -- Lightning shield logic
+    if shaman_utils.auto_lightning_shield_logic(auto_lightning_shield.value) then return end
+
+    -- Tremor totem logic
+    auto_tremor_totem_logic()
+
+    -- Interrupt logic
+    interrupt_logic()
+
     if healer_mode.value then
-        shaman_healer_logic()
+        healer_logic.run()
         return
     end
-    shaman_rotation_logic()
+    if enhancement_dps.value then
+        enhancement_dps_logic.run(
+            core, spell_helper, unit_helper, spell_queue, profiler, auto_attack_helper, health_prediction,
+            auto_tremor_totem, auto_interrupt, auto_lightning_shield, weapon_imbue_state,
+            rockbiter_ranks, windfury_ranks, flametongue_ranks, frostbrand_ranks, SPELLS, SPELL_BUFFS
+        )
+        return
+    end
 end
 core.register_on_update_callback(shaman_plugin_logic)
 
@@ -582,7 +333,7 @@ core.register_on_render_window_callback(function()
             render_checkbox(shaman_window, "Healer Mode", healer_mode, 75)
             render_checkbox(shaman_window, "Allow Use of Potions", allow_potions, 105)
             render_checkbox(shaman_window, "Allow Out of Combat Healing", allow_ooc_heal, 135)
-            render_checkbox(shaman_window, "Solo Leveling DPS Logic", solo_leveling_dps, 165)
+            render_checkbox(shaman_window, "Enhancement DPS Logic", enhancement_dps, 165)
 
             shaman_window:render_text(FONT_MEDIUM, vec2.new(25, 200), color.white(180), "Utility")
             if shaman_window.add_separator then
@@ -619,17 +370,17 @@ end)
     ================================
     - Healing logic now uses both target_selector and health_prediction APIs for advanced healing decisions.
     - Healing logic now only targets self and party members (never random nearby units).
-    - To change the Healing Wave Rank 1 auto-cast HP threshold, edit the value of hp < 90 in shaman_healer_logic().
-    - To add more healing logic (ex: more ranks, Chain Heal, etc), expand the logic inside shaman_healer_logic().
+    - To change the Healing Wave Rank 1 auto-cast HP threshold, edit the value of hp < 90 in Logic.healer_mode().
+    - To add more healing logic (ex: more ranks, Chain Heal, etc), expand the logic inside Logic.healer_mode().
     - There is NO healer UI/window. All healer logic is now fully automatic, driven only by code.
     - Main window UI controls toggles and weapon imbues only.
 
     ==========================================
-    === SOLO LEVELING DPS LOGIC (NEW)       ==
+    === ENHANCEMENT DPS LOGIC (NEW)         ==
     ==========================================
-    - Toggle the "Solo Leveling DPS Logic" checkbox in the Shaman UI to enable/disable DPS/leveling logic.
+    - Toggle "Enhancement DPS Logic" checkbox in the Shaman UI to enable/disable DPS/leveling logic.
     - DPS logic will prioritize highest rank Flame Shock > Earth Shock on nearest enemy IN COMBAT with you.
-    - Lightning Bolt and Lightning Shield are not included in the solo DPS logic.
+    - Uses Blood Fury logic for burst, if available and HP is safe.
     - Imbue spells are controlled by the "Auto Weapon Imbue" checkboxes.
 
     ==========================================
