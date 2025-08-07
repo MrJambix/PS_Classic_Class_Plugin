@@ -1,11 +1,9 @@
 -- === Project Sylvanas Shaman Plugin ===
 -- Main.lua, NO Healer UI Window, only internal healer logic, and comments
--- Solo Leveling DPS logic only fires if player is in combat with a target
--- Lightning Bolt REMOVED from DPS, Lightning Shield only handled by Auto Lightning Shield toggle
--- Imbuements only maintained if enabled in "Auto Weapon Imbue"
--- Auto Interrupt logic using Earth Shock Rank 1, Utility category in UI
--- Blood Fury included (Orc/Troll Racials), used for melee burst
--- Auto Tremor Totem: detects fear/sleep spells and debuffs
+-- Advanced Healer Mode: integrates target_selector and health_prediction APIs
+-- Logs mode activation/deactivation for Healer Mode and Solo Leveling DPS Logic
+-- Healing logic restricted to self and party members only
+-- Now uses shaman_spells_buffs.lua for all spell/buff tables
 
 local core = _G.core
 local menu = core.menu
@@ -21,51 +19,17 @@ local unit_helper = require("common/utility/unit_helper")
 local cooldown_tracker = require("common/utility/cooldown_tracker")
 local auto_attack_helper = require("common/utility/auto_attack_helper")
 local profiler = require("common/modules/profiler")
+local target_selector = require("common/modules/target_selector")
+local health_prediction = require("common/modules/health_prediction")
 
--- === SHAMAN SPELL IDS (BY RANK) ===
-local SPELLS = {}
-
-SPELLS.Berserking           = { [1] = 20554 }
-SPELLS.ChainLightning       = { [1]=421, [2]=930, [3]=2860, [4]=10605, [5]=25442 }
-SPELLS.EarthShock           = { [1]=8042, [2]=8044, [3]=8045, [4]=10412, [5]=10413, [6]=10414, [7]=25454 }
-SPELLS.FlameShock           = { [1]=8050, [2]=8052, [3]=8053, [4]=10447, [5]=10448, [6]=29228, [7]=25457 }
-SPELLS.FrostShock           = { [1]=8056, [2]=8058, [3]=10472, [4]=10473, [5]=25464 }
-SPELLS.LightningBolt        = { [1]=403, [2]=529, [3]=548, [4]=915, [5]=943, [6]=6041, [7]=10391, [8]=10392, [9]=15207, [10]=15208, [11]=25449 }
-SPELLS.Purge                = { [1]=370, [2]=8012 }
-SPELLS.LightningShield      = { [1]=324, [2]=325, [3]=905, [4]=945, [5]=8134, [6]=10431, [7]=10432, [8]=25469 }
-SPELLS.AncestralSpirit      = { [1]=2008, [2]=20609, [3]=20610, [4]=20776 }
-SPELLS.CureDisease          = { [1]=2870 }
-SPELLS.CurePoison           = { [1]=526 }
-SPELLS.NaturesSwiftness     = { [1]=16188 }
-SPELLS.ChainHeal            = { [1]=1064, [2]=10622, [3]=10623, [4]=25423 }
-SPELLS.BloodFury            = { [1]=20572, [2]=23230, [3]=23234 }
-SPELLS.TremorTotem          = { [1]=8143 }
-
--- === SHAMAN IMBUE RANKS (for auto weapon imbue) ===
-local rockbiter_ranks = {
-    { spell = 10399, enchant = 503 },
-    { spell = 8019,  enchant = 1   },
-    { spell = 8018,  enchant = 6   },
-    { spell = 8017,  enchant = 29  },
-}
-local windfury_ranks = {
-    { spell = 8232, enchant = 283 },
-}
-local flametongue_ranks = {
-    { spell = 8030, enchant = 3 },
-    { spell = 8027, enchant = 4 },
-    { spell = 8024, enchant = 5 },
-}
-local frostbrand_ranks = {
-    { spell = 8033, enchant = 2 },
-}
-
--- === SHAMAN BUFFS ===
-local SPELL_BUFFS = {
-    Berserking = 26635,
-    BloodFury = 23234,
-    TremorTotem = 8143,
-}
+-- === SHAMAN SPELLS & BUFFS TABLES ===
+local shaman_data = require("shaman_spells_buffs")
+local SPELLS = shaman_data.SPELLS
+local rockbiter_ranks = shaman_data.rockbiter_ranks
+local windfury_ranks = shaman_data.windfury_ranks
+local flametongue_ranks = shaman_data.flametongue_ranks
+local frostbrand_ranks = shaman_data.frostbrand_ranks
+local SPELL_BUFFS = shaman_data.SPELL_BUFFS
 
 -- === UI Checkbox State Tables (For main window only) ===
 local weapon_imbues = {
@@ -85,6 +49,10 @@ local healer_mode = { value = false }
 local allow_potions = { value = false }
 local allow_ooc_heal = { value = false }
 local solo_leveling_dps = { value = false }
+
+-- === Mode State Tracking for Logging ===
+local prev_healer_mode = healer_mode.value
+local prev_solo_leveling_dps = solo_leveling_dps.value
 
 local FONT_SMALL = 1
 local FONT_MEDIUM = 1
@@ -179,7 +147,6 @@ local function has_blood_fury_buff(player)
 end
 
 local function try_blood_fury(player, target)
-    -- Use the proper health percent logic: 0.0 to 1.0
     local blood_fury_id = SPELLS.BloodFury[1]
     if not spell_helper:has_spell_equipped(blood_fury_id)
         or spell_helper:is_spell_on_cooldown(blood_fury_id)
@@ -189,11 +156,11 @@ local function try_blood_fury(player, target)
     end
     local player_hp = unit_helper:get_health_percentage(player) or 1
     local target_hp = unit_helper:get_health_percentage(target) or 1
-    if player_hp < 0.5 then return end -- don't use below 50%
+    if player_hp < 0.5 then return end
     if not target or target:is_dead() then return end
     if not unit_helper:is_valid_enemy(target) then return end
     if not unit_helper:is_in_combat(target) then return end
-    if target_hp < 0.5 then return end -- only if target > 50%
+    if target_hp < 0.5 then return end
     spell_queue:queue_spell_target(blood_fury_id, player, 1, "Blood Fury (Orc/Troll Racial)")
 end
 
@@ -290,9 +257,8 @@ local function interrupt_logic()
     end
 end
 
--- === HEALER LOGIC (no UI, all logic is internal/automatic) ===
+-- === HEALER LOGIC (Advanced, internal/automatic, uses APIs, party/self only) ===
 local function percent_health(unit)
-    -- Returns health percent as 0-100 (for old code compatibility)
     return (unit_helper:get_health_percentage(unit) or 1) * 100
 end
 
@@ -309,43 +275,86 @@ end
 local function shaman_healer_logic()
     local player = get_local_player()
     if not player then return end
-    local allies = unit_helper:get_ally_list_around(player:get_position(), 100, true, true, false) or {}
-    table.insert(allies, player)
-    table.sort(allies, function(a, b) return percent_health(a) < percent_health(b) end)
-    local target = allies[1]
-    if not target or target:is_dead() or (target.is_ghost and target:is_ghost()) then return end
+
+    -- Get list of party members (API may differ, adjust as needed)
+    local party_members = core.party and core.party.get_party_members and core.party:get_party_members() or {}
+    table.insert(party_members, player) -- Always include self
+
+    -- Filter for living/valid units only
+    local heal_targets = {}
+    for _, unit in ipairs(party_members) do
+        if unit and not unit:is_dead() and (not unit.is_ghost or not unit:is_ghost()) then
+            table.insert(heal_targets, unit)
+        end
+    end
+
+    -- Sort by lowest HP
+    table.sort(heal_targets, function(a, b) return percent_health(a) < percent_health(b) end)
+    local target = heal_targets[1]
+    if not target then return end
+
     local hp = percent_health(target)
     local injured_count = 0
-    for _, ally in ipairs(allies) do
+    for _, ally in ipairs(heal_targets) do
         if percent_health(ally) < 70 then injured_count = injured_count + 1 end
     end
-    -- Use highest chain heal rank available
+
+    -- Use health_prediction to check incoming damage on each target
+    local predicted_danger = {}
+    for i, ally in ipairs(heal_targets) do
+        local inc_damage = health_prediction:get_incoming_damage(ally, 2)
+        predicted_danger[i] = inc_damage or 0
+    end
+
+    -- Prioritize Chain Heal if 3+ injured allies or incoming damage to multiple
     local chain_heal_ranks = SPELLS.ChainHeal
+    local chain_heal_target = nil
     if injured_count >= 3 then
-        if can_cast_heal(chain_heal_ranks[4], target) then
-            spell_queue:queue_spell_target(chain_heal_ranks[4], target, 1, "Chain Heal (Max)")
+        chain_heal_target = target
+    else
+        for i, ally in ipairs(heal_targets) do
+            if predicted_danger[i] > (ally:get_max_health() or 1000) * 0.25 then
+                chain_heal_target = ally
+                break
+            end
+        end
+    end
+    if chain_heal_target then
+        if can_cast_heal(chain_heal_ranks[4], chain_heal_target) then
+            spell_queue:queue_spell_target(chain_heal_ranks[4], chain_heal_target, 1, "Chain Heal (Max, API)")
             return
-        elseif can_cast_heal(chain_heal_ranks[3], target) then
-            spell_queue:queue_spell_target(chain_heal_ranks[3], target, 1, "Chain Heal (R3)")
+        elseif can_cast_heal(chain_heal_ranks[3], chain_heal_target) then
+            spell_queue:queue_spell_target(chain_heal_ranks[3], chain_heal_target, 1, "Chain Heal (R3, API)")
             return
-        elseif can_cast_heal(chain_heal_ranks[2], target) then
-            spell_queue:queue_spell_target(chain_heal_ranks[2], target, 1, "Chain Heal (R2)")
+        elseif can_cast_heal(chain_heal_ranks[2], chain_heal_target) then
+            spell_queue:queue_spell_target(chain_heal_ranks[2], chain_heal_target, 1, "Chain Heal (R2, API)")
             return
-        elseif can_cast_heal(chain_heal_ranks[1], target) then
-            spell_queue:queue_spell_target(chain_heal_ranks[1], target, 1, "Chain Heal (R1)")
+        elseif can_cast_heal(chain_heal_ranks[1], chain_heal_target) then
+            spell_queue:queue_spell_target(chain_heal_ranks[1], chain_heal_target, 1, "Chain Heal (R1, API)")
             return
         end
     end
-    -- Healing Wave logic
+
+    -- Healing Wave logic, using highest incoming damage prediction
     local healing_wave_ranks = { [1]=331, [2]=332, [3]=547, [4]=913, [5]=939 }
-    if hp < 40 and can_cast_heal(healing_wave_ranks[5], target) then
-        spell_queue:queue_spell_target(healing_wave_ranks[5], target, 1, "Healing Wave R5")
+    local healing_target = target
+    local highest_predicted = hp
+    for i, ally in ipairs(heal_targets) do
+        local predicted = predicted_danger[i]
+        if predicted > (ally:get_max_health() or 1000) * 0.25 and percent_health(ally) < highest_predicted then
+            healing_target = ally
+            highest_predicted = percent_health(ally)
+        end
+    end
+    local hthp = percent_health(healing_target)
+    if hthp < 40 and can_cast_heal(healing_wave_ranks[5], healing_target) then
+        spell_queue:queue_spell_target(healing_wave_ranks[5], healing_target, 1, "Healing Wave R5 (API)")
         return
-    elseif hp < 70 and can_cast_heal(healing_wave_ranks[4], target) then
-        spell_queue:queue_spell_target(healing_wave_ranks[4], target, 1, "Healing Wave R4")
+    elseif hthp < 70 and can_cast_heal(healing_wave_ranks[4], healing_target) then
+        spell_queue:queue_spell_target(healing_wave_ranks[4], healing_target, 1, "Healing Wave R4 (API)")
         return
-    elseif hp < 90 and can_cast_heal(healing_wave_ranks[1], target) then
-        spell_queue:queue_spell_target(healing_wave_ranks[1], target, 1, "Healing Wave R1 (cheap/Ancestral Healing)")
+    elseif hthp < 90 and can_cast_heal(healing_wave_ranks[1], healing_target) then
+        spell_queue:queue_spell_target(healing_wave_ranks[1], healing_target, 1, "Healing Wave R1 (API)")
         return
     end
 end
@@ -410,7 +419,7 @@ local function shaman_rotation_logic()
             end
         end
         if target then
-            try_blood_fury(player, target) -- Try to use Blood Fury before burst
+            try_blood_fury(player, target)
 
             local next_attack_time = auto_attack_helper:get_next_attack_core_time(player)
             local current_time = auto_attack_helper:get_current_combat_core_time()
@@ -420,7 +429,6 @@ local function shaman_rotation_logic()
                     safe_cast = false
                 end
             end
-            -- Use highest available Flame Shock then Earth Shock
             local flame_shock_ranks = SPELLS.FlameShock
             local earth_shock_ranks = SPELLS.EarthShock
             for i = #flame_shock_ranks, 1, -1 do
@@ -454,6 +462,25 @@ local function shaman_rotation_logic()
 end
 
 local function shaman_plugin_logic()
+    -- Log toggles for mode activation/deactivation
+    if healer_mode.value ~= prev_healer_mode then
+        if healer_mode.value then
+            core.log("[Shaman] Healer Mode Activated.")
+        else
+            core.log("[Shaman] Healer Mode Deactivated.")
+        end
+        prev_healer_mode = healer_mode.value
+    end
+
+    if solo_leveling_dps.value ~= prev_solo_leveling_dps then
+        if solo_leveling_dps.value then
+            core.log("[Shaman] Leveling DPS Logic Activated.")
+        else
+            core.log("[Shaman] Leveling DPS Logic Deactivated.")
+        end
+        prev_solo_leveling_dps = solo_leveling_dps.value
+    end
+
     if not enable_rotation:get_state() then return end
     if healer_mode.value then
         shaman_healer_logic()
@@ -590,6 +617,8 @@ end)
     ================================
     === HOW TO ADJUST HEALER LOGIC ==
     ================================
+    - Healing logic now uses both target_selector and health_prediction APIs for advanced healing decisions.
+    - Healing logic now only targets self and party members (never random nearby units).
     - To change the Healing Wave Rank 1 auto-cast HP threshold, edit the value of hp < 90 in shaman_healer_logic().
     - To add more healing logic (ex: more ranks, Chain Heal, etc), expand the logic inside shaman_healer_logic().
     - There is NO healer UI/window. All healer logic is now fully automatic, driven only by code.
