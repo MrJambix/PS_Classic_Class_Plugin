@@ -1,0 +1,96 @@
+# Project Sylvanas Shaman Plugin
+
+## Features: What Is Implemented
+
+### ✅ **Healer Mode**
+- Heals only self and party members (never random nearby players).
+- Advanced target selection using health prediction and party status.
+- Chain Heal and Healing Wave logic based on incoming damage and group health.
+- Fully automatic—no healer UI required.
+- Toggle via checkbox in main window, logs activation/deactivation.
+
+### ✅ **Solo Leveling DPS Logic**
+- Prioritizes Flame Shock > Earth Shock on nearest enemy in combat.
+- Lightning Bolt and Lightning Shield are excluded from DPS rotation.
+- Blood Fury racial burst logic for Orc/Troll (if available).
+- Toggle via checkbox, logs activation/deactivation.
+
+### ✅ **Weapon Imbues**
+- Automatic application of Windfury, Rockbiter, Flametongue, or Frostbrand to main hand if enabled.
+- Controlled via radio button UI.
+
+### ✅ **Interrupts & Utility**
+- Auto Interrupt: Uses Earth Shock Rank 1 on enemy casts (heal/CC priority).
+- Auto Tremor Totem: Detects fear/sleep spells and debuffs in party/self, drops totem as needed.
+- Auto Lightning Shield: Maintains shield if enabled.
+
+### ✅ **Logging**
+- Logs mode switches (Healer Mode, Leveling DPS Logic).
+- Logs buffs, spell casts, weapon enchants (when “Enable Logger” is toggled).
+- All actions are automatic, no manual intervention needed.
+
+---
+
+## What Needs To Be Worked On / What Can Be Improved
+
+### ⏳ **Party & Raid Healing Extensions**
+- Add support for raid-wide healing and smarter Chain Heal jumps.
+- Implement logic for healing prioritization (tanks, healers, DPS).
+
+### ⏳ **Advanced DPS Rotations**
+- Add support for spell combos, cooldown tracking, and PvP logic.
+- Integrate Lightning Bolt and other spells for group PvE.
+
+### ⏳ **Totem Automation**
+- Stoneskin, Strength of Earth, Healing Stream, and Mana Spring: Add auto-drop logic based on party needs (currently placeholders).
+
+### ⏳ **PvP Awareness**
+- Smarter spell/totem selection based on PvP situation.
+- Logic for defensive/offensive PvP abilities.
+
+### ⏳ **Configurability**
+- More UI options for customizing healing thresholds, spell priorities, and totem logic.
+- Add options for out-of-combat healing, potion usage, and more.
+
+---
+
+## How To Contribute / Extend
+
+### 🔨 **Add a New Spell or Feature**
+1. **Add spell IDs to the `SPELLS` table** in `main.lua`.
+2. **Implement logic** in the relevant section (healer, DPS, interrupt, utility).
+3. **Use APIs** like `target_selector` and `health_prediction` for intelligent decision-making.
+
+### 🧩 **Improve Healing Logic**
+- Use `core.party:get_party_members()` to get party list.
+- Add prioritization (tanks, healers, lowest HP, incoming damage).
+- Expand Chain Heal jumps and Healing Wave rank selection.
+
+### ⚡ **Improve DPS Logic**
+- Expand DPS spells and combos in `shaman_rotation_logic`.
+- Use `health_prediction:speculate_spell_damage` for kill potential checks.
+
+### 🛡️ **Add More Totem Automation**
+- Use `health_prediction:get_damage_types` to drop Stoneskin or resistance totems.
+- React to debuffs/buffs in party via `buff_manager` or similar.
+
+### 📝 **Add UI Options**
+- Expand menu controls in the window callback section.
+- Add sliders, checkboxes, or dropdowns for new features.
+
+
+---
+
+## FAQ
+
+**Q: How do I change healing thresholds or add new healing spells?**  
+A: Edit `shaman_healer_logic()` in `main.lua`. Adjust the HP values and add new spell IDs to the spell tables.
+
+**Q: Can I add more logic for raids/PvP?**  
+A: Yes, add party/raid member detection and PvP checks using the APIs and expand the logic accordingly.
+
+---
+
+## Credits
+
+- Thanks to the Project Sylvanas community and contributors!
