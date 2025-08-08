@@ -10,11 +10,11 @@ local spell_queue = require("common/modules/spell_queue")
 local buff_manager = require("common/modules/buff_manager")
 local spell_helper = require("common/utility/spell_helper")
 local unit_helper = require("common/utility/unit_helper")
---local cooldown_tracker = require("common/utility/cooldown_tracker")   -- moved to shaman_healer_logic.lua
 local auto_attack_helper = require("common/utility/auto_attack_helper")
 local profiler = require("common/modules/profiler")
 local target_selector = require("common/modules/target_selector")
 local health_prediction = require("common/modules/health_prediction")
+local wigs_tracker = require("common/utility/wigs_tracker")
 
 local shaman_data = require("shaman_spells_buffs")
 local SPELLS = shaman_data.SPELLS
@@ -90,12 +90,31 @@ core.register_on_spell_cast_callback(function(data)
     end
 end)
 
+-- Create the Shaman UI window object
+local shaman_window = core.menu.window("Shaman Main Window")
+local window_position = {
+    x = menu.slider_int(0, 3000, 600, "shaman_window_x"),
+    y = menu.slider_int(0, 3000, 300, "shaman_window_y"),
+}
+local window_size = {
+    x = menu.slider_int(0, 2000, 450, "shaman_window_width"),
+    y = menu.slider_int(0, 2000, 450, "shaman_window_height"),
+}
+shaman_window:set_initial_size(vec2.new(window_size.x:get(), window_size.y:get()))
+shaman_window:set_initial_position(vec2.new(window_position.x:get(), window_position.y:get()))
+
+-- === Menu Tree Node for Plugin and Open UI Button ===
 core.register_on_render_menu_callback(function()
     menu.tree_node():render("Shaman PlugIn", function()
         enable_rotation:render("Enable Shaman PlugIn", "Toggle rotation on/off and show/hide the Shaman UI")
         enable_logger:render("Enable Logger", "Logs all active buffs, spell casts, and main hand imbue info when you click the button below.")
         if menu.button("log_buffs_button"):render("Log Buffs && Mainhand Now") then
             log_player_buffs_and_mainhand()
+        end
+        -- Add the Open Shaman UI Window button (uses window API, not a variable)
+        if menu.button("open_shaman_ui_button"):render("Open Shaman UI Window") then
+            shaman_window:set_visibility(true)
+            shaman_window:set_focus()
         end
     end)
 end)
@@ -155,103 +174,110 @@ local function auto_tremor_totem_logic()
     end
 end
 
--- === Interrupt Logic ===
+-- === Interrupt Logic (Wigs/Boss Mods enhanced) ===
+
+local HEAL_SPELLS = {
+    "Heal","Lesser Heal","Flash Heal","Greater Heal","Holy Light","Prayer of Healing","Healing Wave","Chain Heal","Dark Mending"
+}
+local CC_SPELLS = {
+    "Polymorph","Hex","Sleep","Dominate Mind","Mind Control","Possess","Seduction"
+}
+local FEAR_SPELLS = {
+    "Psychic Scream","Howl of Terror","Intimidating Shout","Terrify","Terror","Banshee Wail"
+}
+local AOE_NUKES = {
+    "Shadow Bolt Volley","Fireball Volley","Frostbolt Volley","Chain Lightning","Arcane Missiles","Flamestrike","Blizzard","Rain of Fire","Hellfire","Mind Flay"
+}
+local UTILITY_SPELLS = {
+    "Resurrection","Revive","Ancestral Spirit","Summon Skeleton","Summon Voidwalker","Summon","Veil of Shadow"
+}
+
+local function contains_spell(spell_name, list)
+    local s = spell_name:lower()
+    for _, v in ipairs(list) do
+        if s:find(v:lower()) then return true end
+    end
+    return false
+end
+
+local function get_highest_earth_shock()
+    for i = #SPELLS.EarthShock, 1, -1 do
+        if spell_helper:has_spell_equipped(SPELLS.EarthShock[i]) then
+            return SPELLS.EarthShock[i]
+        end
+    end
+    return nil
+end
+
 local function interrupt_logic()
     if not auto_interrupt.value then return end
     local player = get_local_player()
     if not player then return end
+
     local enemies = unit_helper:get_enemy_list_around(player:get_position(), 30, true, false, false, false)
-    local interrupt_target = nil
-    local highest_priority = nil
+    local interrupt_target, interrupt_priority = nil, nil
+    local interrupt_spell_name = nil
+
+    -- Scan for casting enemies (in combat)
     for _, unit in ipairs(enemies) do
         if unit_helper:is_valid_enemy(unit) and not unit:is_dead() and not unit_helper:is_dummy(unit) then
             local cast_info = unit.get_cast_info and unit:get_cast_info()
             if cast_info and cast_info.is_casting and not cast_info.is_uninterruptible then
                 local spell_name = cast_info.spell_name or ""
-                local spell_type = cast_info.spell_type or ""
-                if (spell_type == "HEAL" or spell_name:lower():find("heal")) then
-                    interrupt_target, highest_priority = unit, 1
+                -- Prioritize CC
+                if contains_spell(spell_name, CC_SPELLS) then
+                    interrupt_target, interrupt_priority, interrupt_spell_name = unit, 1, spell_name
                     break
-                elseif (spell_type == "CC" or spell_name:lower():find("fear") or spell_name:lower():find("polymorph") or spell_name:lower():find("sleep")) and not highest_priority then
-                    interrupt_target, highest_priority = unit, 2
+                -- Heals (always kick)
+                elseif contains_spell(spell_name, HEAL_SPELLS) then
+                    interrupt_target, interrupt_priority, interrupt_spell_name = unit, 2, spell_name
+                    break
+                -- Fears
+                elseif contains_spell(spell_name, FEAR_SPELLS) then
+                    interrupt_target, interrupt_priority, interrupt_spell_name = unit, 3, spell_name
+                -- Big Nukes
+                elseif contains_spell(spell_name, AOE_NUKES) then
+                    interrupt_target, interrupt_priority, interrupt_spell_name = unit, 4, spell_name
+                -- Utility
+                elseif contains_spell(spell_name, UTILITY_SPELLS) then
+                    interrupt_target, interrupt_priority, interrupt_spell_name = unit, 5, spell_name
                 end
             end
         end
     end
-    local earth_shock_r1 = SPELLS.EarthShock[1]
-    if interrupt_target then
-        if spell_helper:has_spell_equipped(earth_shock_r1)
-            and not spell_helper:is_spell_on_cooldown(earth_shock_r1)
-            and spell_helper:is_spell_in_range(earth_shock_r1, player, interrupt_target:get_position(), player:get_position(), interrupt_target:get_position())
-            and spell_helper:is_spell_in_line_of_sight(earth_shock_r1, player, interrupt_target)
+
+    -- Supplement: Check wigs bars for imminent dangerous casts (boss mods)
+    local bars = wigs_tracker:get_all()
+    for _, bar in ipairs(bars) do
+        local bartext = bar.text or ""
+        if contains_spell(bartext, CC_SPELLS) or contains_spell(bartext, HEAL_SPELLS) or contains_spell(bartext, FEAR_SPELLS)
+            or contains_spell(bartext, AOE_NUKES) or contains_spell(bartext, UTILITY_SPELLS)
+        then
+            -- Find the nearest enemy that is alive and valid for interrupt
+            for _, unit in ipairs(enemies) do
+                if unit_helper:is_valid_enemy(unit) and not unit:is_dead() and not unit_helper:is_dummy(unit) then
+                    interrupt_target, interrupt_priority, interrupt_spell_name = unit, 10, bartext
+                    break
+                end
+            end
+        end
+    end
+
+    -- Attempt to interrupt, prioritizing highest Earth Shock available
+    local earth_shock_id = get_highest_earth_shock()
+    if interrupt_target and earth_shock_id then
+        if spell_helper:has_spell_equipped(earth_shock_id)
+            and not spell_helper:is_spell_on_cooldown(earth_shock_id)
+            and spell_helper:is_spell_in_range(earth_shock_id, player, interrupt_target:get_position(), player:get_position(), interrupt_target:get_position())
+            and spell_helper:is_spell_in_line_of_sight(earth_shock_id, player, interrupt_target)
         then
             profiler.start("Interrupt")
-            spell_queue:queue_spell_target(earth_shock_r1, interrupt_target, 1, "Auto Interrupt: Earth Shock R1")
+            spell_queue:queue_spell_target(earth_shock_id, interrupt_target, 1, "Auto Interrupt: " .. (interrupt_spell_name or "Earth Shock"))
             profiler.stop("Interrupt")
             return
         end
     end
 end
-
-local function shaman_plugin_logic()
-    if healer_mode.value ~= prev_healer_mode then
-        if healer_mode.value then
-            core.log("[Shaman] Healer Mode Activated.")
-        else
-            core.log("[Shaman] Healer Mode Deactivated.")
-        end
-        prev_healer_mode = healer_mode.value
-    end
-
-    if enhancement_dps.value ~= prev_enhancement_dps then
-        if enhancement_dps.value then
-            core.log("[Shaman] Enhancement DPS Logic Activated.")
-        else
-            core.log("[Shaman] Enhancement DPS Logic Deactivated.")
-        end
-        prev_enhancement_dps = enhancement_dps.value
-    end
-
-    if not enable_rotation:get_state() then return end
-
-    -- Weapon imbue logic
-    if shaman_utils.auto_weapon_imbue_logic(weapon_imbue_state) then return end
-
-    -- Lightning shield logic
-    if shaman_utils.auto_lightning_shield_logic(auto_lightning_shield.value) then return end
-
-    -- Tremor totem logic
-    auto_tremor_totem_logic()
-
-    -- Interrupt logic
-    interrupt_logic()
-
-    if healer_mode.value then
-        healer_logic.run()
-        return
-    end
-    if enhancement_dps.value then
-        enhancement_dps_logic.run(
-            core, spell_helper, unit_helper, spell_queue, profiler, auto_attack_helper, health_prediction,
-            auto_tremor_totem, auto_interrupt, auto_lightning_shield, weapon_imbue_state,
-            rockbiter_ranks, windfury_ranks, flametongue_ranks, frostbrand_ranks, SPELLS, SPELL_BUFFS
-        )
-        return
-    end
-end
-core.register_on_update_callback(shaman_plugin_logic)
-
-local shaman_window = core.menu.window("Shaman Main Window")
-local window_position = {
-    x = menu.slider_int(0, 3000, 600, "shaman_window_x"),
-    y = menu.slider_int(0, 3000, 300, "shaman_window_y"),
-}
-local window_size = {
-    x = menu.slider_int(0, 2000, 450, "shaman_window_width"),
-    y = menu.slider_int(0, 2000, 450, "shaman_window_height"),
-}
-shaman_window:set_initial_size(vec2.new(window_size.x:get(), window_size.y:get()))
-shaman_window:set_initial_position(vec2.new(window_position.x:get(), window_position.y:get()))
 
 local function render_checkbox(window, label, state_table, y)
     local checked = (state_table.get_state and state_table:get_state()) or state_table.value
@@ -297,10 +323,10 @@ local function render_weapon_imbue_radio(window, y_start)
 end
 
 core.register_on_render_window_callback(function()
-    if not enable_rotation or not enable_rotation.get_state or not enable_rotation:get_state() then return end
+    if not shaman_window:is_being_shown() then return end
     shaman_window:set_initial_position(vec2.new(window_position.x:get(), window_position.y:get()))
     shaman_window:set_initial_size(vec2.new(window_size.x:get(), window_size.y:get()))
-    shaman_window:begin(
+    local window_open = shaman_window:begin(
         enums.window_enums and enums.window_enums.window_resizing_flags and enums.window_enums.window_resizing_flags.RESIZE_BOTH_AXIS or 0,
         true,
         color.new(22, 22, 44, 240),
@@ -362,7 +388,60 @@ core.register_on_render_window_callback(function()
             shaman_window:render_text(FONT_SMALL, vec2.new(25, util_y), color.white(120), "Coming soon: Advanced DPS options, PvP tools, CC chain, etc.")
         end
     )
+    -- Hide window if X is clicked
+    if not window_open then
+        shaman_window:set_visibility(false)
+    end
 end)
+
+-- === Main plugin update/rotation loop ===
+local function shaman_plugin_logic()
+    if healer_mode.value ~= prev_healer_mode then
+        if healer_mode.value then
+            core.log("[Shaman] Healer Mode Activated.")
+        else
+            core.log("[Shaman] Healer Mode Deactivated.")
+        end
+        prev_healer_mode = healer_mode.value
+    end
+
+    if enhancement_dps.value ~= prev_enhancement_dps then
+        if enhancement_dps.value then
+            core.log("[Shaman] Enhancement DPS Logic Activated.")
+        else
+            core.log("[Shaman] Enhancement DPS Logic Deactivated.")
+        end
+        prev_enhancement_dps = enhancement_dps.value
+    end
+
+    if not enable_rotation:get_state() then return end
+
+    -- Weapon imbue logic
+    if shaman_utils.auto_weapon_imbue_logic(weapon_imbue_state) then return end
+
+    -- Lightning shield logic
+    if shaman_utils.auto_lightning_shield_logic(auto_lightning_shield.value) then return end
+
+    -- Tremor totem logic
+    auto_tremor_totem_logic()
+
+    -- Interrupt logic
+    interrupt_logic()
+
+    if healer_mode.value then
+        healer_logic.run()
+        return
+    end
+    if enhancement_dps.value then
+        enhancement_dps_logic.run(
+            core, spell_helper, unit_helper, spell_queue, profiler, auto_attack_helper, health_prediction,
+            auto_tremor_totem, auto_interrupt, auto_lightning_shield, weapon_imbue_state,
+            rockbiter_ranks, windfury_ranks, flametongue_ranks, frostbrand_ranks, SPELLS, SPELL_BUFFS
+        )
+        return
+    end
+end
+core.register_on_update_callback(shaman_plugin_logic)
 
 --[[ 
     ================================
