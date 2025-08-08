@@ -2,6 +2,7 @@
 
 Welcome to the **Project Sylvanas Classic Era/HardCore Class Plugin System**!  
 This project provides a modular plugin architecture for automating WoW Classic gameplay. Each class has its own folder and dedicated plugin.
+This project is created to encourage open source class rotations from the community!
 
 ---
 
@@ -20,6 +21,8 @@ PS_Classic_Class_Plugin/
 │
 ├── Shaman/
 │   ├── main.lua
+│   ├── header.lua
+│   ├── <anyOtherSupportingCode>
 │   └── README.md
 ├── <OtherClass>/
 │   └── README.md
@@ -30,9 +33,7 @@ PS_Classic_Class_Plugin/
 ---
 
 
-## ✨ Shaman Plugin Highlights
-
-See [`Shaman/README.md`](./Shaman/README.md) for full details.
+## Shaman Plugin Highlights
 
 - Healer Mode: Smart healing for self and party using health prediction.
 - DPS Mode: Solo leveling DPS logic prioritizing Flame Shock/Earth Shock.
@@ -52,15 +53,6 @@ See [`Shaman/README.md`](./Shaman/README.md) for full details.
 - **To improve existing plugins:**
     - See individual class README for TODOs and suggestions.
     - Pull requests are welcome!
-
----
-
-## Roadmap
-
-- [ ] Expand plugins for all WoW Classic classes.
-- [ ] Add raid healing and advanced DPS for all classes.
-- [ ] Improve UI configurability.
-- [ ] Community suggestions and contributions!
 
 ---
 
